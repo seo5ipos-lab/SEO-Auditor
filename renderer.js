@@ -95,7 +95,11 @@ window.openProject = (id) => {
     document.getElementById('dash-info').innerText = `Домены: ${activeProj.domains} | Бренд: ${activeProj.brands}`;
     document.getElementById('proj-queries').value = activeProj.queries.join('\n');
     
-    tempSelectedModels = new Set(activeProj.models);
+    // Восстановление чекбоксов
+    document.getElementById('cb-google-ai').checked = activeProj.models.includes('google-ai');
+    document.getElementById('cb-yandex-alisa').checked = activeProj.models.includes('yandex-alisa');
+    
+    tempSelectedModels = new Set(activeProj.models.filter(m => m !== 'google-ai' && m !== 'yandex-alisa'));
     document.getElementById('search-models').value = '';
     renderModelsList();
     
@@ -132,7 +136,12 @@ function renderModelsList() {
 
 window.saveProjectData = () => {
     activeProj.queries = document.getElementById('proj-queries').value.split('\n').map(q=>q.trim()).filter(Boolean);
-    activeProj.models = Array.from(tempSelectedModels);
+    
+    const nativeModels = [];
+    if (document.getElementById('cb-google-ai').checked) nativeModels.push('google-ai');
+    if (document.getElementById('cb-yandex-alisa').checked) nativeModels.push('yandex-alisa');
+    
+    activeProj.models = [...Array.from(tempSelectedModels), ...nativeModels];
     ipcRenderer.send('save-project', activeProj);
     alert('Настройки проекта сохранены!');
 }
@@ -154,13 +163,11 @@ async function fetchWordstatRealAPI(query, token) {
             body: JSON.stringify({ method: method, param: param, token: token })
         });
 
-        // 1. Создаем отчет
         const createRes = await fetch(url, reqOpts('CreateNewWordstatReport', { Phrases: [query], GeoID: [225] }));
         const createData = await createRes.json();
         if (createData.error_code) throw new Error(createData.error_str);
         const reportId = createData.data;
 
-        // 2. Ждем готовности отчета
         let isDone = false;
         let attempts = 0;
         while (!isDone && attempts < 15) {
@@ -174,13 +181,10 @@ async function fetchWordstatRealAPI(query, token) {
             attempts++;
         }
 
-        // 3. Забираем данные
         if (isDone) {
             const getRes = await fetch(url, reqOpts('GetWordstatReport', reportId));
             const getData = await getRes.json();
             const freq = getData.data[0]?.SearchedWith[0]?.Shows || 0;
-            
-            // 4. Удаляем отчет
             await fetch(url, reqOpts('DeleteWordstatReport', reportId));
             return { freq: freq, status: `<span class="text-green-600 font-bold">${freq}</span>` };
         } else {
@@ -206,9 +210,8 @@ function resetQueueUI() {
 }
 
 btnStart.addEventListener('click', async () => {
-    activeProj.queries = document.getElementById('proj-queries').value.split('\n').map(q=>q.trim()).filter(Boolean);
-    activeProj.models = Array.from(tempSelectedModels);
-    ipcRenderer.send('save-project', activeProj);
+    // Автосохранение перед стартом
+    window.saveProjectData();
 
     if (activeProj.queries.length === 0 || activeProj.models.length === 0) return alert('Добавьте запросы и выберите модели!');
     if (!settings.openRouterKey) return alert('Нет API ключа OpenRouter!');
@@ -223,8 +226,6 @@ btnStart.addEventListener('click', async () => {
     taskQueue = [];
     completedTasksCount = 0;
     isCancelled = false;
-    
-    // Предзагрузка Wordstat (чтобы не дублировать запросы)
     const wordstatCache = {};
 
     for (const q of activeProj.queries) {
@@ -279,6 +280,11 @@ async function processQueue() {
         abortCtrl = new AbortController();
         const tid = `tr-${Date.now()}-${Math.floor(Math.random()*1000)}`;
         
+        let visualModelName = task.model;
+        let modelBg = 'bg-blue-100 text-blue-700';
+        if (task.model === 'google-ai') { visualModelName = 'Google AI'; modelBg = 'bg-green-100 text-green-700'; }
+        if (task.model === 'yandex-alisa') { visualModelName = 'Yandex Нейро'; modelBg = 'bg-red-100 text-red-700'; }
+
         // Рендер Аккордеона в таблице
         const trMain = document.createElement('tr');
         trMain.className = "hover:bg-blue-50 border-b cursor-pointer transition";
@@ -286,7 +292,7 @@ async function processQueue() {
         trMain.innerHTML = `
             <td class="p-3 border-r">
                 <div class="font-semibold text-gray-800">${task.query}</div>
-                <div class="text-xs text-blue-700 bg-blue-100 inline-block px-2 py-0.5 rounded mt-1">${task.model}</div>
+                <div class="text-xs ${modelBg} inline-block px-2 py-0.5 rounded mt-1">${visualModelName}</div>
             </td>
             <td class="p-3 border-r text-center" id="${tid}-ws"><span class="animate-pulse text-gray-400">WS...</span></td>
             <td class="p-3 border-r text-center" id="${tid}-status"><span class="animate-pulse text-blue-500">Генерация...</span></td>
@@ -297,7 +303,7 @@ async function processQueue() {
         const trDet = document.createElement('tr');
         trDet.id = `det-${tid}`;
         trDet.className = "hidden bg-white border-b";
-        trDet.innerHTML = `<td colspan="5"><div class="p-4 text-sm text-gray-700 markdown-body" id="${tid}-content">Идет генерация...</div></td>`;
+        trDet.innerHTML = `<td colspan="5"><div class="p-4 text-sm text-gray-700 markdown-body" id="${tid}-content">Ожидание данных...</div></td>`;
 
         tbody.prepend(trDet); 
         tbody.prepend(trMain);
@@ -313,41 +319,54 @@ async function processQueue() {
             const wsFreqData = currentSession.wordstatCache[task.query];
             document.getElementById(`${tid}-ws`).innerHTML = wsFreqData.status;
 
-            // Запрос в нейросеть
-            const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${settings.openRouterKey}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: task.model, messages: [{role: 'user', content: task.query}], stream: true }),
-                signal: abortCtrl.signal
-            });
+            // РАЗВИЛКА: Нативный парсер ИЛИ OpenRouter API
+            if (task.model === 'google-ai' || task.model === 'yandex-alisa') {
+                document.getElementById(`${tid}-status`).innerHTML = `<span class="animate-pulse text-purple-500 font-bold">Окно парсера...</span>`;
+                
+                const parseRes = await ipcRenderer.invoke('parse-search-engine', { engine: task.model, query: task.query });
+                if (parseRes.error) throw new Error(parseRes.error);
+                
+                fullText = parseRes.text || '';
+                document.getElementById(`${tid}-content`).innerHTML = marked.parse(fullText);
+            } else {
+                // Запрос в нейросеть через OpenRouter
+                const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${settings.openRouterKey}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: task.model, messages: [{role: 'user', content: task.query}], stream: true }),
+                    signal: abortCtrl.signal
+                });
 
-            if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+                if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
 
-            const reader = res.body.getReader(); const decoder = new TextDecoder();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                const lines = decoder.decode(value, { stream: true }).split('\n').filter(l => l.trim() !== '');
-                for (const line of lines) {
-                    if (line.replace(/^data: /, '') === '[DONE]') break;
-                    if (line.startsWith('data: ')) {
-                        try {
-                            const parsed = JSON.parse(line.replace(/^data: /, ''));
-                            if (parsed.choices && parsed.choices[0].delta && parsed.choices[0].delta.content) {
-                                fullText += parsed.choices[0].delta.content;
-                                document.getElementById(`${tid}-content`).innerHTML = marked.parse(fullText); // Рендер Markdown
-                            }
-                        } catch(e){}
+                const reader = res.body.getReader(); const decoder = new TextDecoder();
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const lines = decoder.decode(value, { stream: true }).split('\n').filter(l => l.trim() !== '');
+                    for (const line of lines) {
+                        if (line.replace(/^data: /, '') === '[DONE]') break;
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const parsed = JSON.parse(line.replace(/^data: /, ''));
+                                if (parsed.choices && parsed.choices[0].delta && parsed.choices[0].delta.content) {
+                                    fullText += parsed.choices[0].delta.content;
+                                    document.getElementById(`${tid}-content`).innerHTML = marked.parse(fullText);
+                                }
+                            } catch(e){}
+                        }
                     }
                 }
+                
+                // Подсчет стоимости только для платных API
+                const pricing = modelsPricing[task.model] || { prompt: 0, completion: 0 };
+                const inCost = (task.query.length / 4) * parseFloat(pricing.prompt || 0);
+                const outCost = (fullText.length / 4) * parseFloat(pricing.completion || 0);
+                currentSession.totalCost += (inCost + outCost);
+                document.getElementById('status-cost').innerText = `$${currentSession.totalCost.toFixed(6)}`;
             }
-            
-            const pricing = modelsPricing[task.model] || { prompt: 0, completion: 0 };
-            const inCost = (task.query.length / 4) * parseFloat(pricing.prompt || 0);
-            const outCost = (fullText.length / 4) * parseFloat(pricing.completion || 0);
-            currentSession.totalCost += (inCost + outCost);
-            document.getElementById('status-cost').innerText = `$${currentSession.totalCost.toFixed(6)}`;
 
+            // ОБЩАЯ ЛОГИКА ДЛЯ ВСЕХ МОДЕЛЕЙ (Оценка ответа)
             const foundDomains = extractDomains(fullText);
             document.getElementById(`${tid}-src`).innerHTML = foundDomains.length > 0 ? foundDomains.join(', ') : '<span class="text-gray-400">Нет</span>';
             foundDomains.forEach(d => {
@@ -397,7 +416,7 @@ async function processQueue() {
                 trDet.remove();
                 break; 
             } else {
-                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-600 font-bold">Ошибка API</span>`;
+                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-600 font-bold">Ошибка: ${error.message.substring(0,20)}</span>`;
                 completedTasksCount++;
             }
         }
@@ -449,7 +468,6 @@ window.renderHistory = () => {
     
     tbody.innerHTML = '';
     Array.from(allQueries).forEach(q => {
-        // Находим частотность (из последней сессии, где она есть)
         let latestFreq = 'WS';
         for(let i = activeProj.sessions.length - 1; i >= 0; i--) {
             if(activeProj.sessions[i].queriesResult[q] && activeProj.sessions[i].queriesResult[q].freq) {
@@ -528,7 +546,12 @@ function drawCharts() {
             }
             return total > 0 ? (found/total)*100 : null;
         });
-        datasetsModels.push({ label: model, data: data, borderColor: colors[mIdx % colors.length], tension: 0.3, spanGaps: true });
+        
+        let visualLabel = model;
+        if (model === 'google-ai') visualLabel = 'Google AI';
+        if (model === 'yandex-alisa') visualLabel = 'Yandex Нейро';
+        
+        datasetsModels.push({ label: visualLabel, data: data, borderColor: colors[mIdx % colors.length], tension: 0.3, spanGaps: true });
         mIdx++;
     });
 
