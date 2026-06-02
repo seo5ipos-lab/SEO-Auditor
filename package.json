@@ -1,0 +1,27 @@
+{
+  "name": "multi-llm-seo-auditor",
+  "version": "1.0.0",
+  "description": "Аналитическое приложение SEO Auditor",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable"
+  },
+  "author": "Разработка Пуксель",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {
+    "axios": "^1.6.7",
+    "lowdb": "^1.0.0"
+  },
+  "build": {
+    "appId": "com.puksel.seoauditor",
+    "productName": "SEO Auditor",
+    "win": {
+      "target": "portable"
+    }
+  }
+}
