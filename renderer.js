@@ -1,8 +1,16 @@
 const { ipcRenderer } = require('electron');
 
+// --- ОБНОВЛЕННЫЙ РЕНДЕР ССЫЛОК (Защита от обновлений API marked.js) ---
 const mdRenderer = new marked.Renderer();
-mdRenderer.link = (href, title, text) => `<a href="${href}" target="_blank" class="source-link" data-url="${href}"><svg class="w-3 h-3 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg> ${text} <span class="tooltip-text">${href}</span></a>`;
+mdRenderer.link = function(token) {
+    // Проверяем, какой формат данных нам прислала библиотека (строка или объект)
+    const href = typeof token === 'string' ? arguments[0] : token.href;
+    const text = typeof token === 'string' ? arguments[2] : (token.text || 'Ссылка');
+    
+    return `<a href="${href}" target="_blank" class="source-link" data-url="${href}"><svg class="w-3 h-3 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg> ${text} <span class="tooltip-text">${href}</span></a>`;
+};
 marked.use({ renderer: mdRenderer });
+// ----------------------------------------------------------------------
 
 let settings = {}, projects = [], activeProj = null, allModels = [];
 let tempSelectedModels = new Set();
@@ -113,7 +121,6 @@ window.openProject = (id) => {
     document.getElementById('cb-google-ai').checked = activeProj.models.includes('google-ai');
     document.getElementById('cb-yandex-alisa').checked = activeProj.models.includes('yandex-alisa');
     
-    // Восстанавливаем настройки веб-поиска и потоков
     document.getElementById('cb-web-search').checked = !!activeProj.useWebSearch;
     document.getElementById('num-concurrency').value = activeProj.concurrency || 1;
 
@@ -167,7 +174,6 @@ window.saveProjectData = () => {
     if (document.getElementById('cb-google-ai').checked) nativeModels.push('google-ai');
     if (document.getElementById('cb-yandex-alisa').checked) nativeModels.push('yandex-alisa');
     
-    // Сохраняем настройки веб-поиска и потоков
     activeProj.useWebSearch = document.getElementById('cb-web-search').checked;
     activeProj.concurrency = parseInt(document.getElementById('num-concurrency').value) || 1;
 
@@ -280,7 +286,6 @@ async function processQueue() {
 
         let fullText = '';
         try {
-            // Элегантное решение Race Condition для API Яндекса с помощью Promise
             if (currentSession.wordstatCache[task.query] === undefined) {
                 currentSession.wordstatCache[task.query] = fetchWordstatRealAPI(task.query, settings.yandexToken).then(res => {
                     currentSession.queriesResult[task.query].freq = res.freq;
@@ -324,11 +329,8 @@ async function processQueue() {
             } else {
                 document.getElementById(`${tid}-status`).innerHTML = `<span class="animate-pulse text-blue-500 font-semibold">Генерация...</span>`;
                 
-                // Добавляем плагин веб-поиска, если он включен
                 const reqBody = { model: task.model, messages: [{role: 'user', content: task.query}], stream: true };
-                if (activeProj.useWebSearch) {
-                    reqBody.plugins = [{ id: "web" }];
-                }
+                if (activeProj.useWebSearch) reqBody.plugins = [{ id: "web" }];
 
                 const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                     method: 'POST', headers: { 'Authorization': `Bearer ${settings.openRouterKey}`, 'Content-Type': 'application/json' },
@@ -388,23 +390,12 @@ async function processQueue() {
                 document.getElementById(`${tid}-sent`).innerHTML = `<span class="text-slate-300">-</span>`;
             }
 
-            currentSession.queriesResult[task.query].modelsData[task.model] = {
-                found: isBrandFound ? 1 : 0,
-                text: fullText,
-                sentiment: sentimentResult,
-                domains: foundDomains
-            };
-
+            currentSession.queriesResult[task.query].modelsData[task.model] = { found: isBrandFound ? 1 : 0, text: fullText, sentiment: sentimentResult, domains: foundDomains };
             completedTasksCount++;
             document.getElementById('status-progress').innerText = `${completedTasksCount}/${currentSession.totalTasks}`;
 
         } catch (error) {
-            if (error.name === 'AbortError') { 
-                taskQueue.unshift(task); 
-                trMain.remove(); 
-                trDet.remove(); 
-                return; // Прерываем процесс для этого потока, если была пауза/отмена
-            } 
+            if (error.name === 'AbortError') { taskQueue.unshift(task); trMain.remove(); trDet.remove(); return; } 
             else { 
                 document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-500 font-bold text-xs">Ошибка</span>`; 
                 completedTasksCount++; 
@@ -413,20 +404,15 @@ async function processQueue() {
         }
     };
 
-    // Запускаем воркеры параллельно
     const runWorker = async () => {
         while (taskQueue.length > 0 && !isPaused && !isCancelled) {
-            const task = taskQueue.shift();
-            if (!task) break;
-            await processTask(task);
+            const task = taskQueue.shift(); if (!task) break; await processTask(task);
         }
     };
 
     const maxWorkers = Math.min(5, Math.max(1, parseInt(activeProj.concurrency) || 1));
     const workers = [];
-    for (let i = 0; i < maxWorkers; i++) {
-        workers.push(runWorker());
-    }
+    for (let i = 0; i < maxWorkers; i++) workers.push(runWorker());
 
     await Promise.all(workers);
 
@@ -442,9 +428,7 @@ async function processQueue() {
 // --- ИСТОРИЯ И СНИМКИ (SNAPSHOTS) ---
 window.deleteSession = (index, e) => {
     e.stopPropagation();
-    if(confirm('Удалить эту сессию съема?')) {
-        activeProj.sessions.splice(index, 1); ipcRenderer.send('save-project', activeProj); renderHistory();
-    }
+    if(confirm('Удалить эту сессию съема?')) { activeProj.sessions.splice(index, 1); ipcRenderer.send('save-project', activeProj); renderHistory(); }
 }
 
 window.renderHistory = () => {
@@ -453,8 +437,7 @@ window.renderHistory = () => {
     
     if (!activeProj || !activeProj.sessions) return;
     
-    const tbody = document.getElementById('history-list-tbody');
-    tbody.innerHTML = '';
+    const tbody = document.getElementById('history-list-tbody'); tbody.innerHTML = '';
     
     activeProj.sessions.forEach((s, idx) => {
         tbody.innerHTML += `
@@ -463,11 +446,8 @@ window.renderHistory = () => {
                 <td class="p-4 text-center text-slate-500 font-medium">${s.totalTasks || 0}</td>
                 <td class="p-4 text-center font-bold text-blue-600">${s.vGen}%</td>
                 <td class="p-4 text-center font-bold text-emerald-600">${s.vWeight}%</td>
-                <td class="p-4 text-center">
-                    <button onclick="deleteSession(${idx}, event)" class="bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded text-xs font-bold transition">Удалить</button>
-                </td>
-            </tr>
-        `;
+                <td class="p-4 text-center"><button onclick="deleteSession(${idx}, event)" class="bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded text-xs font-bold transition">Удалить</button></td>
+            </tr>`;
     });
 
     let allCompetitors = {};
@@ -484,14 +464,11 @@ window.openSnapshot = (idx) => {
     const s = activeProj.sessions[idx];
     document.getElementById('history-main-view').classList.add('hidden');
     document.getElementById('history-snapshot-view').classList.remove('hidden');
-    
     document.getElementById('snapshot-title').innerText = `Снимок выдачи от ${s.date}`;
     document.getElementById('snap-vgen').innerText = `V (Общая): ${s.vGen}%`;
     document.getElementById('snap-vweight').innerText = `V (Взвешенная): ${s.vWeight}%`;
     
-    const tbody = document.getElementById('snapshot-tbody');
-    tbody.innerHTML = '';
-    
+    const tbody = document.getElementById('snapshot-tbody'); tbody.innerHTML = '';
     if(!s.queriesResult) return;
     
     Object.entries(s.queriesResult).forEach(([query, data]) => {
@@ -499,7 +476,6 @@ window.openSnapshot = (idx) => {
         Object.entries(data.modelsData).forEach(([model, mData]) => {
             const tid = `snap-${idx}-${Math.floor(Math.random()*10000)}`;
             const isFound = mData.found === 1;
-            
             const trMain = document.createElement('tr');
             trMain.className = `hover:bg-slate-50 border-b border-slate-100 cursor-pointer transition ${isFound ? 'bg-emerald-50/20' : ''}`;
             trMain.onclick = () => toggleAccordion(`det-${tid}`);
