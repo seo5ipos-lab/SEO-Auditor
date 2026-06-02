@@ -98,7 +98,6 @@ function updateProjectDashboardUI() {
 }
 
 window.openProject = (id) => {
-    // ЖЕСТКАЯ ИЗОЛЯЦИЯ: Сброс таблиц и очередей
     document.getElementById('results-tbody').innerHTML = '<tr><td colspan="5" class="p-8 text-center text-slate-400">Очередь пуста</td></tr>';
     taskQueue = []; currentSession = null; completedTasksCount = 0; resetQueueUI();
     document.getElementById('history-snapshot-view').classList.add('hidden');
@@ -113,6 +112,11 @@ window.openProject = (id) => {
     
     document.getElementById('cb-google-ai').checked = activeProj.models.includes('google-ai');
     document.getElementById('cb-yandex-alisa').checked = activeProj.models.includes('yandex-alisa');
+    
+    // Восстанавливаем настройки веб-поиска и потоков
+    document.getElementById('cb-web-search').checked = !!activeProj.useWebSearch;
+    document.getElementById('num-concurrency').value = activeProj.concurrency || 1;
+
     tempSelectedModels = new Set(activeProj.models.filter(m => m !== 'google-ai' && m !== 'yandex-alisa'));
     document.getElementById('search-models').value = '';
     renderModelsList();
@@ -162,6 +166,11 @@ window.saveProjectData = () => {
     const nativeModels = [];
     if (document.getElementById('cb-google-ai').checked) nativeModels.push('google-ai');
     if (document.getElementById('cb-yandex-alisa').checked) nativeModels.push('yandex-alisa');
+    
+    // Сохраняем настройки веб-поиска и потоков
+    activeProj.useWebSearch = document.getElementById('cb-web-search').checked;
+    activeProj.concurrency = parseInt(document.getElementById('num-concurrency').value) || 1;
+
     activeProj.models = [...Array.from(tempSelectedModels), ...nativeModels];
     ipcRenderer.send('save-project', activeProj);
     const btn = document.querySelector('button[onclick="saveProjectData()"]'); const oldText = btn.innerText;
@@ -242,10 +251,11 @@ async function processQueue() {
     const tbody = document.getElementById('results-tbody');
     const brandKeywords = (activeProj.brands || '').split(',').map(b=>b.trim().toLowerCase()).filter(Boolean);
     const myDomains = (activeProj.domains || '').split(',').map(d=>d.trim().toLowerCase()).filter(Boolean);
+    
+    abortCtrl = new AbortController();
 
-    while (taskQueue.length > 0 && !isPaused && !isCancelled) {
-        const task = taskQueue.shift(); abortCtrl = new AbortController();
-        const tid = `tr-${Date.now()}`;
+    const processTask = async (task) => {
+        const tid = `tr-${Date.now()}-${Math.floor(Math.random()*10000)}`;
         
         let visualModelName = task.model;
         let modelBg = 'bg-blue-50 text-blue-700 border-blue-200';
@@ -270,15 +280,16 @@ async function processQueue() {
 
         let fullText = '';
         try {
+            // Элегантное решение Race Condition для API Яндекса с помощью Promise
             if (currentSession.wordstatCache[task.query] === undefined) {
-                const wsResult = await fetchWordstatRealAPI(task.query, settings.yandexToken);
-                currentSession.wordstatCache[task.query] = wsResult;
-                currentSession.queriesResult[task.query].freq = wsResult.freq;
+                currentSession.wordstatCache[task.query] = fetchWordstatRealAPI(task.query, settings.yandexToken).then(res => {
+                    currentSession.queriesResult[task.query].freq = res.freq;
+                    return res;
+                });
             }
-            const wsFreqData = currentSession.wordstatCache[task.query];
+            const wsFreqData = await currentSession.wordstatCache[task.query];
             document.getElementById(`${tid}-ws`).innerHTML = wsFreqData.status;
 
-            // РУЧНОЙ ВВОД ДЛЯ НАИВНЫХ СИСТЕМ
             if (task.model === 'google-ai' || task.model === 'yandex-alisa') {
                 document.getElementById(`${tid}-status`).innerHTML = `<span class="text-amber-600 font-bold text-[10px] uppercase">Ждет ввода</span>`;
                 document.getElementById(`${tid}-content`).innerHTML = `
@@ -294,7 +305,8 @@ async function processQueue() {
                 `;
                 
                 await new Promise((resolve, reject) => {
-                    abortCtrl.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+                    const abortHandler = () => reject(new DOMException('Aborted', 'AbortError'));
+                    abortCtrl.signal.addEventListener('abort', abortHandler);
                     
                     document.getElementById(`btn-open-${tid}`).onclick = (e) => {
                         e.stopPropagation();
@@ -305,14 +317,22 @@ async function processQueue() {
                         fullText = document.getElementById(`manual-text-${tid}`).value.trim();
                         if(!fullText) return alert('Введите текст!');
                         document.getElementById(`${tid}-content`).innerHTML = marked.parse(fullText);
+                        abortCtrl.signal.removeEventListener('abort', abortHandler);
                         resolve();
                     };
                 });
             } else {
                 document.getElementById(`${tid}-status`).innerHTML = `<span class="animate-pulse text-blue-500 font-semibold">Генерация...</span>`;
+                
+                // Добавляем плагин веб-поиска, если он включен
+                const reqBody = { model: task.model, messages: [{role: 'user', content: task.query}], stream: true };
+                if (activeProj.useWebSearch) {
+                    reqBody.plugins = [{ id: "web" }];
+                }
+
                 const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                     method: 'POST', headers: { 'Authorization': `Bearer ${settings.openRouterKey}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model: task.model, messages: [{role: 'user', content: task.query}], stream: true }), signal: abortCtrl.signal
+                    body: JSON.stringify(reqBody), signal: abortCtrl.signal
                 });
                 if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
 
@@ -343,8 +363,6 @@ async function processQueue() {
             foundDomains.forEach(d => { if(!myDomains.includes(d)) currentSession.domainsFound[d] = (currentSession.domainsFound[d] || 0) + 1; });
 
             const isBrandFound = brandKeywords.some(b => fullText.toLowerCase().includes(b)) || foundDomains.some(d => myDomains.includes(d));
-            
-            // Сохранение ДЕТАЛЬНЫХ данных в историю
             let sentimentResult = '-';
             
             if (wsFreqData.freq > 0) { currentSession.weightTotal += wsFreqData.freq; if(isBrandFound) currentSession.weightedSum += wsFreqData.freq; }
@@ -370,7 +388,6 @@ async function processQueue() {
                 document.getElementById(`${tid}-sent`).innerHTML = `<span class="text-slate-300">-</span>`;
             }
 
-            // Запись снимка для History
             currentSession.queriesResult[task.query].modelsData[task.model] = {
                 found: isBrandFound ? 1 : 0,
                 text: fullText,
@@ -382,10 +399,36 @@ async function processQueue() {
             document.getElementById('status-progress').innerText = `${completedTasksCount}/${currentSession.totalTasks}`;
 
         } catch (error) {
-            if (error.name === 'AbortError') { taskQueue.unshift(task); trMain.remove(); trDet.remove(); break; } 
-            else { document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-500 font-bold text-xs">Ошибка</span>`; completedTasksCount++; }
+            if (error.name === 'AbortError') { 
+                taskQueue.unshift(task); 
+                trMain.remove(); 
+                trDet.remove(); 
+                return; // Прерываем процесс для этого потока, если была пауза/отмена
+            } 
+            else { 
+                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-500 font-bold text-xs">Ошибка</span>`; 
+                completedTasksCount++; 
+                document.getElementById('status-progress').innerText = `${completedTasksCount}/${currentSession.totalTasks}`;
+            }
         }
+    };
+
+    // Запускаем воркеры параллельно
+    const runWorker = async () => {
+        while (taskQueue.length > 0 && !isPaused && !isCancelled) {
+            const task = taskQueue.shift();
+            if (!task) break;
+            await processTask(task);
+        }
+    };
+
+    const maxWorkers = Math.min(5, Math.max(1, parseInt(activeProj.concurrency) || 1));
+    const workers = [];
+    for (let i = 0; i < maxWorkers; i++) {
+        workers.push(runWorker());
     }
+
+    await Promise.all(workers);
 
     if (!isPaused && !isCancelled && taskQueue.length === 0) {
         currentSession.vGen = currentSession.totalTasks > 0 ? ((currentSession.successQueries / currentSession.totalTasks) * 100).toFixed(1) : 0;
