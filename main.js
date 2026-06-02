@@ -28,8 +28,8 @@ function createWindow() {
         height: 900,
         webPreferences: {
             nodeIntegration: true,
-            contextIsolation: false
-			webSecurity: false // Отключаем защиту для прямых запросов к API
+            contextIsolation: false,
+            webSecurity: false // Отключено для обхода CORS в Wordstat API
         }
     });
     mainWindow.loadFile('index.html');
@@ -66,13 +66,14 @@ ipcMain.handle('parse-search-engine', async (event, data) => {
 
         parserWin.loadURL(url);
 
-        // Внедряемые скрипты для поиска текста нейросетей
+        // Внедряемые скрипты для поиска текста нейросетей (С ТВОИМИ НОВЫМИ КЛАССАМИ)
         const checkCode = engine === 'google-ai' ? `
             (function() {
                 if (document.querySelector('form[action="/errors/t"]') || document.body.innerText.includes('systems have detected unusual traffic')) return 'CAPTCHA';
                 
                 // Ищем блок SGE / AI Overview
-                const aiBlock = document.querySelector('[data-attrid="SGE_SUMMARY"]') || 
+                const aiBlock = document.querySelector('.n6owBd.awi2gc') || 
+                                document.querySelector('[data-attrid="SGE_SUMMARY"]') || 
                                 document.querySelector('.M8OgIe') || 
                                 document.querySelector('div[jscontroller="eL7ihd"]');
                 
@@ -84,7 +85,8 @@ ipcMain.handle('parse-search-engine', async (event, data) => {
                 if (document.querySelector('.CheckboxCaptcha') || document.querySelector('.g-recaptcha')) return 'CAPTCHA';
                 
                 // Ищем блок Яндекс Нейро
-                const aiBlock = document.querySelector('.Neuro-Text') || 
+                const aiBlock = document.querySelector('[data-fast-name="neuro_answer"]') ||
+                                document.querySelector('.Neuro-Text') || 
                                 document.querySelector('.neuro-result__content') || 
                                 document.querySelector('.AliceSummary-Text');
                 
@@ -125,6 +127,7 @@ ipcMain.handle('parse-search-engine', async (event, data) => {
     });
 });
 
+// --- IPC Мосты ---
 ipcMain.handle('get-settings', () => db.get('settings').value());
 ipcMain.on('save-settings', (event, newSettings) => { db.set('settings', newSettings).write(); });
 
