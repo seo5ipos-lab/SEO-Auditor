@@ -14,7 +14,8 @@ function initDB() {
         settings: {
             openRouterKey: '',
             yandexToken: '',
-            systemPrompt: 'Сделай краткий SEO-анализ по этим агрегированным данным. Оцени динамику видимости. Выдели главные угрозы со стороны конкурентов.'
+            systemPrompt: 'Сделай краткий SEO-анализ по этим агрегированным данным. Оцени динамику видимости. Выдели главные угрозы со стороны конкурентов.',
+            favorites: [] // Новое поле для избранных моделей
         },
         projects: []
     }).write();
@@ -29,7 +30,7 @@ function createWindow() {
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
-            webSecurity: false // Отключено для обхода CORS в Wordstat API
+            webSecurity: false
         }
     });
     mainWindow.loadFile('index.html');
@@ -43,13 +44,12 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
-// Нативный парсер для Google и Яндекс
 ipcMain.handle('parse-search-engine', async (event, data) => {
     const { engine, query } = data;
     return new Promise((resolve) => {
         let isResolved = false;
         let parserWin = new BrowserWindow({
-            width: 1100, height: 800, show: true,
+            width: 1200, height: 800, show: true,
             webPreferences: { nodeIntegration: false, contextIsolation: true }
         });
 
@@ -66,68 +66,48 @@ ipcMain.handle('parse-search-engine', async (event, data) => {
 
         parserWin.loadURL(url);
 
-        // Внедряемые скрипты для поиска текста нейросетей (С ТВОИМИ НОВЫМИ КЛАССАМИ)
-        const checkCode = engine === 'google-ai' ? `
-            (function() {
-                if (document.querySelector('form[action="/errors/t"]') || document.body.innerText.includes('systems have detected unusual traffic')) return 'CAPTCHA';
+        // Инъекция кнопки ручного извлечения прямо в страницу поисковика
+        const injectExtractionButton = `
+            return new Promise((resolve) => {
+                const btn = document.createElement('button');
+                btn.innerText = '📥 ИЗВЛЕЧЬ ОТВЕТ НЕЙРОСЕТИ';
+                btn.style.cssText = 'position:fixed; bottom:30px; right:30px; z-index:999999; padding:20px 30px; background:#2563eb; color:white; font-size:16px; font-weight:bold; border:none; border-radius:12px; cursor:pointer; box-shadow:0 10px 15px -3px rgba(0,0,0,0.3); transition: transform 0.2s;';
+                btn.onmouseover = () => btn.style.transform = 'scale(1.05)';
+                btn.onmouseout = () => btn.style.transform = 'scale(1)';
                 
-                // Ищем блок SGE / AI Overview
-                const aiBlock = document.querySelector('.n6owBd.awi2gc') || 
-                                document.querySelector('[data-attrid="SGE_SUMMARY"]') || 
-                                document.querySelector('.M8OgIe') || 
-                                document.querySelector('div[jscontroller="eL7ihd"]');
-                
-                if (aiBlock && aiBlock.innerText.length > 50) return aiBlock.innerText;
-                return null;
-            })()
-        ` : `
-            (function() {
-                if (document.querySelector('.CheckboxCaptcha') || document.querySelector('.g-recaptcha')) return 'CAPTCHA';
-                
-                // Ищем блок Яндекс Нейро
-                const aiBlock = document.querySelector('[data-fast-name="neuro_answer"]') ||
-                                document.querySelector('.Neuro-Text') || 
-                                document.querySelector('.neuro-result__content') || 
-                                document.querySelector('.AliceSummary-Text');
-                
-                if (aiBlock && aiBlock.innerText.length > 50) return aiBlock.innerText;
-                return null;
-            })()
+                document.body.appendChild(btn);
+
+                btn.onclick = () => {
+                    btn.innerText = 'Обработка...';
+                    let text = '';
+                    // Ищем по всем возможным селекторам Яндекса и Гугла
+                    const aiBlock = document.querySelector('.n6owBd.awi2gc') || 
+                                    document.querySelector('[data-attrid="SGE_SUMMARY"]') || 
+                                    document.querySelector('.M8OgIe') || 
+                                    document.querySelector('[data-fast-name="neuro_answer"]') ||
+                                    document.querySelector('.Neuro-Text') || 
+                                    document.querySelector('.neuro-result__content') || 
+                                    document.querySelector('.AliceSummary-Text');
+                    
+                    if (aiBlock) text = aiBlock.innerText;
+                    resolve(text || 'Текст не найден. Возможно, блок не успел сгенерироваться.');
+                };
+            });
         `;
 
-        let attempts = 0;
-        const interval = setInterval(async () => {
-            if (parserWin.isDestroyed()) {
-                clearInterval(interval); return;
-            }
+        parserWin.webContents.on('did-finish-load', async () => {
             try {
-                const result = await parserWin.webContents.executeJavaScript(checkCode);
-                if (result === 'CAPTCHA') {
-                    // Просто ждем, пока юзер введет капчу, попытки не тратим
-                } else if (result) {
-                    clearInterval(interval);
-                    if (!isResolved) {
-                        isResolved = true;
-                        resolve({ text: result });
-                        parserWin.destroy();
-                    }
-                } else {
-                    attempts++;
-                    if (attempts > 120) { // Ждем 2 минуты максимум
-                        clearInterval(interval);
-                        if (!isResolved) {
-                            isResolved = true;
-                            resolve({ error: 'Таймаут (Блок ИИ не появился)' });
-                            parserWin.destroy();
-                        }
-                    }
+                const result = await parserWin.webContents.executeJavaScript(injectExtractionButton);
+                if (!isResolved) {
+                    isResolved = true;
+                    resolve({ text: result });
+                    parserWin.destroy();
                 }
             } catch(e) {}
-        }, 1000);
+        });
     });
 });
 
-// --- IPC Мосты ---
 ipcMain.handle('get-settings', () => db.get('settings').value());
 ipcMain.on('save-settings', (event, newSettings) => { db.set('settings', newSettings).write(); });
 
