@@ -3,17 +3,16 @@ const path = require('path');
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
 
-// Настройка базы данных lowdb
 const adapter = new FileSync('db.json');
 const db = low(adapter);
 
-// Задаем структуру базы данных по умолчанию (строго по ТЗ)
+// Полная структура БД по ТЗ
 db.defaults({
     settings: {
         openRouterKey: '',
         endpoint: 'https://openrouter.ai/api/v1',
         wordstatKey: '',
-        systemPrompt: 'Сделай краткий SEO-анализ на основе собранных данных.'
+        systemPrompt: 'Сделай краткий SEO-анализ. Верни список доменов конкурентов.'
     },
     projects: [],
     tasks: [],
@@ -24,40 +23,41 @@ db.defaults({
 let mainWindow;
 
 function createWindow() {
-    // Создаем главное окно приложения
     mainWindow = new BrowserWindow({
-        width: 1200,
-        height: 800,
+        width: 1280,
+        height: 850,
         webPreferences: {
             nodeIntegration: true,
-            contextIsolation: false // Для простоты сборки и связки frontend/backend
+            contextIsolation: false
         }
     });
-
-    // Загружаем визуальный интерфейс
     mainWindow.loadFile('index.html');
-    
-    // mainWindow.webContents.openDevTools(); // Позже раскомментируем для поиска ошибок
+    mainWindow.setMenuBarVisibility(false);
 }
 
-// Запуск окна, когда Electron готов к работе
 app.whenReady().then(createWindow);
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
-// Закрытие процесса при закрытии всех окон (стандарт для Windows)
-app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-        app.quit();
+// IPC Мосты для настроек и проектов
+ipcMain.handle('get-settings', () => db.get('settings').value());
+ipcMain.on('save-settings', (event, newSettings) => { db.set('settings', newSettings).write(); });
+
+ipcMain.handle('get-projects', () => db.get('projects').value());
+ipcMain.on('save-project', (event, project) => {
+    const projects = db.get('projects');
+    if (projects.find({ id: project.id }).value()) {
+        projects.find({ id: project.id }).assign(project).write();
+    } else {
+        projects.push(project).write();
     }
 });
-
-// --- Блок связи (IPC) между визуальным интерфейсом и базой данных ---
-
-// Интерфейс просит выдать текущие настройки
-ipcMain.handle('get-settings', () => {
-    return db.get('settings').value();
+ipcMain.on('delete-project', (event, projectId) => {
+    db.get('projects').remove({ id: projectId }).write();
 });
 
-// Интерфейс просит сохранить новые настройки
-ipcMain.on('save-settings', (event, newSettings) => {
-    db.set('settings', newSettings).write();
+// Сохранение результатов сессии
+ipcMain.on('save-session-results', (event, data) => {
+    db.get('tasks').push(data.task).write();
+    data.queries.forEach(q => db.get('queries').push(q).write());
+    data.responses.forEach(r => db.get('responses').push(r).write());
 });
