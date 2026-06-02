@@ -29,6 +29,7 @@ function createWindow() {
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false
+			webSecurity: false // Отключаем защиту для прямых запросов к API
         }
     });
     mainWindow.loadFile('index.html');

@@ -157,15 +157,24 @@ function extractDomains(text) {
 async function fetchWordstatRealAPI(query, token) {
     if (!token) return { freq: 0, status: '<span class="text-red-500 text-xs">Нет токена</span>' };
     try {
-        const url = 'https://api.direct.yandex.com/v4/json/';
+        const url = 'https://api.direct.yandex.ru/v4/json/';
         const reqOpts = (method, param) => ({
             method: 'POST',
+            headers: {
+                'Content-Type': 'application/json; charset=utf-8'
+            },
             body: JSON.stringify({ method: method, param: param, token: token })
         });
 
         const createRes = await fetch(url, reqOpts('CreateNewWordstatReport', { Phrases: [query], GeoID: [225] }));
         const createData = await createRes.json();
-        if (createData.error_code) throw new Error(createData.error_str);
+        
+        // ЕСЛИ ЯНДЕКС ВОЗВРАЩАЕТ ОШИБКУ — ВЫВОДИМ ЕЁ
+        if (createData.error_code) {
+            console.error("Ошибка Yandex:", createData.error_str);
+            return { freq: 0, status: `<span class="text-red-600 font-bold text-[10px]" title="${createData.error_str}">Код: ${createData.error_code}</span>` };
+        }
+        
         const reportId = createData.data;
 
         let isDone = false;
@@ -188,10 +197,10 @@ async function fetchWordstatRealAPI(query, token) {
             await fetch(url, reqOpts('DeleteWordstatReport', reportId));
             return { freq: freq, status: `<span class="text-green-600 font-bold">${freq}</span>` };
         } else {
-            return { freq: 0, status: '<span class="text-orange-500 text-xs">Таймаут WS</span>' };
+            return { freq: 0, status: '<span class="text-orange-500 text-[10px]">Таймаут WS</span>' };
         }
     } catch (e) {
-        return { freq: 0, status: '<span class="text-red-500 text-xs">Ошибка WS API</span>' };
+        return { freq: 0, status: `<span class="text-red-500 text-[10px]" title="${e.message}">Сбой сети</span>` };
     }
 }
 
