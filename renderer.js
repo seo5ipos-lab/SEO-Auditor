@@ -7,6 +7,7 @@ let globalChartInst = null, modelsChartInst = null;
 
 let taskQueue = [];
 let isPaused = false;
+let isCancelled = false;
 let abortCtrl = null;
 let currentSession = null;
 let completedTasksCount = 0;
@@ -15,7 +16,7 @@ async function init() {
     settings = await ipcRenderer.invoke('get-settings');
     if (settings) {
         document.getElementById('set-or').value = settings.openRouterKey || '';
-        document.getElementById('set-ws').value = settings.wordstatKey || '';
+        document.getElementById('set-ya').value = settings.yandexToken || '';
         document.getElementById('set-prompt').value = settings.systemPrompt || '';
         if (settings.openRouterKey) fetchModelsAsync(settings.openRouterKey);
     }
@@ -24,7 +25,7 @@ async function init() {
 
 document.getElementById('btn-save-settings').addEventListener('click', () => {
     settings.openRouterKey = document.getElementById('set-or').value.trim();
-    settings.wordstatKey = document.getElementById('set-ws').value.trim();
+    settings.yandexToken = document.getElementById('set-ya').value.trim();
     settings.systemPrompt = document.getElementById('set-prompt').value.trim();
     ipcRenderer.send('save-settings', settings);
     if (settings.openRouterKey) fetchModelsAsync(settings.openRouterKey);
@@ -37,16 +38,10 @@ async function fetchModelsAsync(key) {
         const data = await res.json();
         allModels = data.data || [];
         allModels.forEach(m => {
-            // Безопасное извлечение цен, так как у некоторых моделей OpenRouter нет объекта pricing
-            modelsPricing[m.id] = { 
-                prompt: m.pricing?.prompt || 0, 
-                completion: m.pricing?.completion || 0 
-            };
+            modelsPricing[m.id] = { prompt: m.pricing?.prompt || 0, completion: m.pricing?.completion || 0 };
         });
         renderModelsList();
-    } catch (e) { 
-        console.error("Ошибка загрузки моделей:", e); 
-    }
+    } catch (e) { console.error("Ошибка загрузки моделей:", e); }
 }
 
 async function loadProjects() {
@@ -115,14 +110,11 @@ function renderModelsList() {
     const list = document.getElementById('proj-models-list');
     const search = document.getElementById('search-models').value.toLowerCase();
     list.innerHTML = '';
-    
-    if (allModels.length === 0) return list.innerHTML = '<p class="text-red-500">Модели не загружены. Проверьте API ключ.</p>';
+    if (allModels.length === 0) return list.innerHTML = '<p class="text-red-500">Модели не загружены.</p>';
     
     allModels.forEach(m => {
-        // ЗАЩИТА: У некоторых моделей OpenRouter отсутствует поле name или id
         const mId = m.id ? m.id.toLowerCase() : '';
         const mName = m.name ? m.name.toLowerCase() : '';
-
         if (mId.includes(search) || mName.includes(search)) {
             const checked = tempSelectedModels.has(m.id) ? 'checked' : '';
             const label = document.createElement('label');
@@ -151,25 +143,75 @@ function extractDomains(text) {
     while ((match = regex.exec(text)) !== null) { matches.push(match[1].toLowerCase()); }
     return [...new Set(matches)];
 }
-async function fetchWordstat() { return Math.floor(Math.random() * 5000) + 10; }
+
+// РЕАЛЬНЫЙ API YANDEX WORDSTAT (Директ API v4)
+async function fetchWordstatRealAPI(query, token) {
+    if (!token) return { freq: 0, status: '<span class="text-red-500 text-xs">Нет токена</span>' };
+    try {
+        const url = 'https://api.direct.yandex.com/v4/json/';
+        const reqOpts = (method, param) => ({
+            method: 'POST',
+            body: JSON.stringify({ method: method, param: param, token: token })
+        });
+
+        // 1. Создаем отчет
+        const createRes = await fetch(url, reqOpts('CreateNewWordstatReport', { Phrases: [query], GeoID: [225] }));
+        const createData = await createRes.json();
+        if (createData.error_code) throw new Error(createData.error_str);
+        const reportId = createData.data;
+
+        // 2. Ждем готовности отчета
+        let isDone = false;
+        let attempts = 0;
+        while (!isDone && attempts < 15) {
+            await new Promise(r => setTimeout(r, 2000));
+            const listRes = await fetch(url, reqOpts('GetWordstatReportList', null));
+            const listData = await listRes.json();
+            if (listData.data) {
+                const report = listData.data.find(r => r.ReportID === reportId);
+                if (report && report.StatusReport === 'Done') isDone = true;
+            }
+            attempts++;
+        }
+
+        // 3. Забираем данные
+        if (isDone) {
+            const getRes = await fetch(url, reqOpts('GetWordstatReport', reportId));
+            const getData = await getRes.json();
+            const freq = getData.data[0]?.SearchedWith[0]?.Shows || 0;
+            
+            // 4. Удаляем отчет
+            await fetch(url, reqOpts('DeleteWordstatReport', reportId));
+            return { freq: freq, status: `<span class="text-green-600 font-bold">${freq}</span>` };
+        } else {
+            return { freq: 0, status: '<span class="text-orange-500 text-xs">Таймаут WS</span>' };
+        }
+    } catch (e) {
+        return { freq: 0, status: '<span class="text-red-500 text-xs">Ошибка WS API</span>' };
+    }
+}
 
 // --- УПРАВЛЕНИЕ ОЧЕРЕДЬЮ И СЪЕМ ---
 const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
 const btnContinue = document.getElementById('btn-continue');
+const btnCancel = document.getElementById('btn-cancel');
+
+function resetQueueUI() {
+    btnStart.classList.remove('hidden');
+    btnStop.classList.add('hidden');
+    btnContinue.classList.add('hidden');
+    btnCancel.classList.add('hidden');
+    document.getElementById('status-progress').innerHTML = 'Остановлено/Отменено';
+}
 
 btnStart.addEventListener('click', async () => {
-    // АВТОСОХРАНЕНИЕ: Принудительно сохраняем проект перед стартом
     activeProj.queries = document.getElementById('proj-queries').value.split('\n').map(q=>q.trim()).filter(Boolean);
     activeProj.models = Array.from(tempSelectedModels);
     ipcRenderer.send('save-project', activeProj);
 
-    if (activeProj.queries.length === 0 || activeProj.models.length === 0) {
-        return alert('Внимание: Добавьте хотя бы один поисковый запрос и выберите минимум одну модель (галочкой)!');
-    }
-    if (!settings.openRouterKey) {
-        return alert('Нет API ключа! Перейдите в "Глобальные Настройки" и укажите ключ OpenRouter.');
-    }
+    if (activeProj.queries.length === 0 || activeProj.models.length === 0) return alert('Добавьте запросы и выберите модели!');
+    if (!settings.openRouterKey) return alert('Нет API ключа OpenRouter!');
 
     document.getElementById('results-tbody').innerHTML = ''; 
     currentSession = {
@@ -180,16 +222,19 @@ btnStart.addEventListener('click', async () => {
     
     taskQueue = [];
     completedTasksCount = 0;
+    isCancelled = false;
     
+    // Предзагрузка Wordstat (чтобы не дублировать запросы)
+    const wordstatCache = {};
+
     for (const q of activeProj.queries) {
-        const wsFreq = await fetchWordstat();
-        currentSession.queriesResult[q] = { freq: wsFreq, modelsData: {} };
+        currentSession.queriesResult[q] = { freq: 0, modelsData: {} };
         for (const m of activeProj.models) {
-            taskQueue.push({ query: q, model: m, wsFreq: wsFreq });
+            taskQueue.push({ query: q, model: m });
         }
     }
 
-    startQueue();
+    startQueue(wordstatCache);
 });
 
 btnStop.addEventListener('click', () => {
@@ -197,18 +242,30 @@ btnStop.addEventListener('click', () => {
     if (abortCtrl) abortCtrl.abort();
     btnStop.classList.add('hidden');
     btnContinue.classList.remove('hidden');
-    document.getElementById('status-progress').innerHTML += ' <span class="text-red-500 font-bold">(Остановлено)</span>';
+    document.getElementById('status-progress').innerHTML += ' <span class="text-yellow-600 font-bold">(Пауза)</span>';
 });
 
 btnContinue.addEventListener('click', () => {
-    startQueue();
+    startQueue(currentSession.wordstatCache || {});
 });
 
-function startQueue() {
+btnCancel.addEventListener('click', () => {
+    if(confirm('Отменить задачу? Данные не будут сохранены в историю.')) {
+        isCancelled = true;
+        taskQueue = [];
+        if (abortCtrl) abortCtrl.abort();
+        resetQueueUI();
+    }
+});
+
+function startQueue(wsCache) {
     isPaused = false;
+    isCancelled = false;
+    currentSession.wordstatCache = wsCache;
     btnStart.classList.add('hidden');
     btnContinue.classList.add('hidden');
     btnStop.classList.remove('hidden');
+    btnCancel.classList.remove('hidden');
     processQueue();
 }
 
@@ -217,27 +274,46 @@ async function processQueue() {
     const brandKeywords = (activeProj.brands || '').split(',').map(b=>b.trim().toLowerCase()).filter(Boolean);
     const myDomains = (activeProj.domains || '').split(',').map(d=>d.trim().toLowerCase()).filter(Boolean);
 
-    while (taskQueue.length > 0 && !isPaused) {
+    while (taskQueue.length > 0 && !isPaused && !isCancelled) {
         const task = taskQueue.shift(); 
         abortCtrl = new AbortController();
         const tid = `tr-${Date.now()}-${Math.floor(Math.random()*1000)}`;
         
-        const tr = document.createElement('tr');
-        tr.id = tid;
-        tr.className = "hover:bg-gray-50 border-b";
-        tr.innerHTML = `
+        // Рендер Аккордеона в таблице
+        const trMain = document.createElement('tr');
+        trMain.className = "hover:bg-blue-50 border-b cursor-pointer transition";
+        trMain.onclick = () => toggleAccordion(`det-${tid}`);
+        trMain.innerHTML = `
             <td class="p-3 border-r">
                 <div class="font-semibold text-gray-800">${task.query}</div>
-                <div class="text-xs text-blue-700 bg-blue-50 inline-block px-1 rounded mt-1">${task.model}</div>
+                <div class="text-xs text-blue-700 bg-blue-100 inline-block px-2 py-0.5 rounded mt-1">${task.model}</div>
             </td>
-            <td class="p-3 border-r" id="${tid}-status"><span class="animate-pulse text-blue-500">Генерация...</span></td>
-            <td class="p-3 border-r" id="${tid}-sent"><span class="text-gray-400">-</span></td>
-            <td class="p-3 text-xs" id="${tid}-src"><span class="text-gray-400">-</span></td>
+            <td class="p-3 border-r text-center" id="${tid}-ws"><span class="animate-pulse text-gray-400">WS...</span></td>
+            <td class="p-3 border-r text-center" id="${tid}-status"><span class="animate-pulse text-blue-500">Генерация...</span></td>
+            <td class="p-3 border-r text-center" id="${tid}-sent"><span class="text-gray-400">-</span></td>
+            <td class="p-3 text-xs overflow-hidden" id="${tid}-src"><span class="text-gray-400">-</span></td>
         `;
-        tbody.prepend(tr);
+
+        const trDet = document.createElement('tr');
+        trDet.id = `det-${tid}`;
+        trDet.className = "hidden bg-white border-b";
+        trDet.innerHTML = `<td colspan="5"><div class="p-4 text-sm text-gray-700 markdown-body" id="${tid}-content">Идет генерация...</div></td>`;
+
+        tbody.prepend(trDet); 
+        tbody.prepend(trMain);
 
         let fullText = '';
         try {
+            // Получаем WS частотность (с кешированием)
+            if (currentSession.wordstatCache[task.query] === undefined) {
+                const wsResult = await fetchWordstatRealAPI(task.query, settings.yandexToken);
+                currentSession.wordstatCache[task.query] = wsResult;
+                currentSession.queriesResult[task.query].freq = wsResult.freq;
+            }
+            const wsFreqData = currentSession.wordstatCache[task.query];
+            document.getElementById(`${tid}-ws`).innerHTML = wsFreqData.status;
+
+            // Запрос в нейросеть
             const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${settings.openRouterKey}`, 'Content-Type': 'application/json' },
@@ -259,13 +335,13 @@ async function processQueue() {
                             const parsed = JSON.parse(line.replace(/^data: /, ''));
                             if (parsed.choices && parsed.choices[0].delta && parsed.choices[0].delta.content) {
                                 fullText += parsed.choices[0].delta.content;
+                                document.getElementById(`${tid}-content`).innerHTML = marked.parse(fullText); // Рендер Markdown
                             }
                         } catch(e){}
                     }
                 }
             }
             
-            // Защищенный подсчет стоимости
             const pricing = modelsPricing[task.model] || { prompt: 0, completion: 0 };
             const inCost = (task.query.length / 4) * parseFloat(pricing.prompt || 0);
             const outCost = (fullText.length / 4) * parseFloat(pricing.completion || 0);
@@ -273,25 +349,24 @@ async function processQueue() {
             document.getElementById('status-cost').innerText = `$${currentSession.totalCost.toFixed(6)}`;
 
             const foundDomains = extractDomains(fullText);
-            document.getElementById(`${tid}-src`).innerHTML = foundDomains.length > 0 ? foundDomains.join('<br>') : '<span class="text-gray-400">Нет</span>';
+            document.getElementById(`${tid}-src`).innerHTML = foundDomains.length > 0 ? foundDomains.join(', ') : '<span class="text-gray-400">Нет</span>';
             foundDomains.forEach(d => {
                 if(!myDomains.includes(d)) currentSession.domainsFound[d] = (currentSession.domainsFound[d] || 0) + 1;
             });
 
             const isBrandFound = brandKeywords.some(b => fullText.toLowerCase().includes(b)) || foundDomains.some(d => myDomains.includes(d));
             
-            // Безопасная запись результата
-            if (!currentSession.queriesResult[task.query]) currentSession.queriesResult[task.query] = { freq: task.wsFreq, modelsData: {} };
             currentSession.queriesResult[task.query].modelsData[task.model] = isBrandFound ? 1 : 0;
             
-            if (task.wsFreq > 0) {
-                currentSession.weightTotal += task.wsFreq;
-                if(isBrandFound) currentSession.weightedSum += task.wsFreq;
+            if (wsFreqData.freq > 0) {
+                currentSession.weightTotal += wsFreqData.freq;
+                if(isBrandFound) currentSession.weightedSum += wsFreqData.freq;
             }
 
             if (isBrandFound) {
                 currentSession.successQueries++;
-                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-green-600 font-bold">✓ Обнаружен</span>`;
+                trMain.classList.replace('hover:bg-blue-50', 'hover:bg-green-50');
+                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-green-600 font-bold">✓ Да</span>`;
                 document.getElementById(`${tid}-sent`).innerHTML = '<span class="text-blue-500 animate-pulse text-xs">Анализ...</span>';
                 
                 try {
@@ -308,7 +383,7 @@ async function processQueue() {
                     document.getElementById(`${tid}-sent`).innerHTML = `<span class="text-orange-500 text-xs">Ошибка ИИ</span>`;
                 }
             } else {
-                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-gray-400 font-bold">✗ Отсутствует</span>`;
+                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-gray-400 font-bold">✗ Нет</span>`;
                 document.getElementById(`${tid}-sent`).innerHTML = `<span class="text-gray-300">-</span>`;
             }
 
@@ -318,7 +393,8 @@ async function processQueue() {
         } catch (error) {
             if (error.name === 'AbortError') {
                 taskQueue.unshift(task); 
-                tr.remove(); 
+                trMain.remove(); 
+                trDet.remove();
                 break; 
             } else {
                 document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-600 font-bold">Ошибка API</span>`;
@@ -327,7 +403,7 @@ async function processQueue() {
         }
     }
 
-    if (!isPaused && taskQueue.length === 0) {
+    if (!isPaused && !isCancelled && taskQueue.length === 0) {
         currentSession.vGen = currentSession.totalTasks > 0 ? ((currentSession.successQueries / currentSession.totalTasks) * 100).toFixed(1) : 0;
         currentSession.vWeight = currentSession.weightTotal > 0 ? ((currentSession.weightedSum / currentSession.weightTotal) * 100).toFixed(1) : 0;
         
@@ -335,7 +411,7 @@ async function processQueue() {
         ipcRenderer.send('save-project', activeProj);
         document.getElementById('status-progress').innerText += ' (Съем завершен)';
         
-        btnStop.classList.add('hidden');
+        resetQueueUI();
         btnStart.classList.remove('hidden');
         btnStart.innerText = 'Начать новый съем';
     }
@@ -361,7 +437,7 @@ window.renderHistory = () => {
     const thead = document.getElementById('history-thead');
     const tbody = document.getElementById('history-tbody');
     
-    let ths = '<tr><th class="p-2 border-r">Запрос</th><th class="p-2 border-r">WS</th>';
+    let ths = '<tr><th class="p-2 border-r">Запрос</th><th class="p-2 border-r text-center">Частотность</th>';
     activeProj.sessions.forEach((s, idx) => {
         ths += `<th class="p-2 text-center border-r bg-white min-w-[120px]">
             <div class="text-xs text-gray-500 mb-1">${s.date}</div>
@@ -373,7 +449,16 @@ window.renderHistory = () => {
     
     tbody.innerHTML = '';
     Array.from(allQueries).forEach(q => {
-        let row = `<tr><td class="p-2 border-r text-sm font-semibold text-gray-700">${q}</td><td class="p-2 border-r text-xs text-gray-400 text-center">WS</td>`;
+        // Находим частотность (из последней сессии, где она есть)
+        let latestFreq = 'WS';
+        for(let i = activeProj.sessions.length - 1; i >= 0; i--) {
+            if(activeProj.sessions[i].queriesResult[q] && activeProj.sessions[i].queriesResult[q].freq) {
+                latestFreq = activeProj.sessions[i].queriesResult[q].freq;
+                break;
+            }
+        }
+
+        let row = `<tr><td class="p-2 border-r text-sm font-semibold text-gray-700">${q}</td><td class="p-2 border-r text-xs font-bold text-blue-600 text-center">${latestFreq}</td>`;
         activeProj.sessions.forEach(s => {
             if(s.queriesResult && s.queriesResult[q]) {
                 const modelsData = s.queriesResult[q].modelsData || {};

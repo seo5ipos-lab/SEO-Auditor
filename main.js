@@ -6,7 +6,6 @@ const FileSync = require('lowdb/adapters/FileSync');
 let db;
 
 function initDB() {
-    // Сохраняем БД в надежном системном каталоге AppData, чтобы данные не стирались
     const dbPath = path.join(app.getPath('userData'), 'seo-auditor-db.json');
     const adapter = new FileSync(dbPath);
     db = low(adapter);
@@ -14,7 +13,7 @@ function initDB() {
     db.defaults({
         settings: {
             openRouterKey: '',
-            wordstatKey: '',
+            yandexToken: '', // Добавлено поле для реального токена Яндекса
             systemPrompt: 'Сделай краткий SEO-анализ по этим агрегированным данным. Оцени динамику видимости. Выдели главные угрозы со стороны конкурентов.'
         },
         projects: []

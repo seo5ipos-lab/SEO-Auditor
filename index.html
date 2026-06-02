@@ -12,6 +12,7 @@
         .markdown-body h1, .markdown-body h2, .markdown-body h3 { font-weight: bold; margin-bottom: 0.5rem; }
         .markdown-body ul { list-style-type: disc; margin-left: 1.5rem; margin-bottom: 1rem; }
         .markdown-body a { color: #2563eb; text-decoration: underline; }
+        .accordion-body { transition: all 0.3s ease-in-out; }
     </style>
 </head>
 <body class="bg-slate-50 text-gray-800 font-sans h-screen flex flex-col">
@@ -41,9 +42,11 @@
                 <h2 class="text-xl font-bold mb-4">API Ключи и Системный Промпт</h2>
                 <label class="block mb-1 text-sm font-semibold">OpenRouter API Key:</label>
                 <input type="password" id="set-or" class="w-full border rounded p-2 mb-4 bg-slate-50">
-                <label class="block mb-1 text-sm font-semibold">Wordstat API Key (Заглушка):</label>
-                <input type="password" id="set-ws" class="w-full border rounded p-2 mb-4 bg-slate-50">
-                <label class="block mb-1 text-sm font-semibold">Системный промпт (Для итогового анализа Gemma):</label>
+                <label class="block mb-1 text-sm font-semibold">Yandex OAuth Токен (Для Wordstat API):</label>
+                <input type="password" id="set-ya" class="w-full border rounded p-2 mb-1 bg-slate-50" placeholder="y0_AgAAAA...">
+                <p class="text-xs text-gray-500 mb-4">Сгенерируйте OAuth-токен по ссылке: https://oauth.yandex.ru/authorize?response_type=token&client_id=ТВОЙ_CLIENT_ID</p>
+                
+                <label class="block mb-1 text-sm font-semibold">Системный промпт (Для аналитика Gemma):</label>
                 <textarea id="set-prompt" class="w-full border rounded p-2 mb-4 h-32 bg-slate-50"></textarea>
                 <button id="btn-save-settings" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 w-full font-bold">Сохранить настройки</button>
             </div>
@@ -93,24 +96,26 @@
                     </div>
                     <div class="space-x-2 flex">
                         <button id="btn-start" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded shadow">Начать съем</button>
-                        <button id="btn-stop" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded shadow hidden">Остановить</button>
-                        <button id="btn-continue" class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded shadow hidden">Продолжить</button>
+                        <button id="btn-stop" class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded shadow hidden">Пауза</button>
+                        <button id="btn-continue" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded shadow hidden">Продолжить</button>
+                        <button id="btn-cancel" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded shadow hidden">Отменить задачу</button>
                     </div>
                 </div>
                 
-                <h3 class="text-lg font-bold mb-4">Мониторинг сессии</h3>
+                <h3 class="text-lg font-bold mb-4">Мониторинг сессии (Кликни на строку, чтобы открыть текст)</h3>
                 <div class="overflow-x-auto bg-white shadow rounded">
-                    <table class="w-full text-sm text-left border-collapse">
+                    <table class="w-full text-sm text-left border-collapse" style="table-layout: fixed;">
                         <thead class="bg-slate-100 border-b">
                             <tr>
-                                <th class="p-3 border-r w-1/3">Промпт (Модель)</th>
-                                <th class="p-3 border-r">Попадание в ответы</th>
-                                <th class="p-3 border-r">Тональность</th>
-                                <th class="p-3">Источники</th>
+                                <th class="p-3 border-r w-[25%]">Промпт (Модель)</th>
+                                <th class="p-3 border-r w-[15%] text-center">Wordstat</th>
+                                <th class="p-3 border-r w-[20%] text-center">Попадание</th>
+                                <th class="p-3 border-r w-[20%] text-center">Тональность</th>
+                                <th class="p-3 w-[20%]">Источники</th>
                             </tr>
                         </thead>
                         <tbody id="results-tbody" class="divide-y">
-                            <tr><td colspan="4" class="p-4 text-center text-gray-500">Запустите съем для отображения данных</td></tr>
+                            <tr><td colspan="5" class="p-4 text-center text-gray-500">Запустите съем для отображения данных</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -144,7 +149,6 @@
                     <div class="col-span-1 space-y-6">
                         <div class="bg-white p-4 rounded shadow border-t-4 border-purple-500">
                             <h3 class="font-bold mb-2 text-purple-700">ИИ-Аналитик (Gemma)</h3>
-                            <p class="text-xs text-gray-500 mb-3">Глубокий анализ истории и конкурентов.</p>
                             <button onclick="runFinalAnalysis()" class="w-full bg-purple-600 hover:bg-purple-700 text-white py-2 rounded font-bold shadow mb-3">Анализировать динамику</button>
                             <div id="final-analysis-box" class="text-sm text-gray-700 bg-purple-50 p-3 rounded hidden markdown-body max-h-96 overflow-y-auto"></div>
                         </div>
@@ -192,6 +196,14 @@
             btn.classList.remove('border-transparent', 'text-gray-500');
             btn.classList.add('border-blue-600', 'text-blue-600', 'font-bold');
             if(id === 'ptab-history') renderHistory();
+        }
+        function toggleAccordion(id) {
+            const el = document.getElementById(id);
+            if (el.classList.contains('hidden')) {
+                el.classList.remove('hidden');
+            } else {
+                el.classList.add('hidden');
+            }
         }
     </script>
 </body>
