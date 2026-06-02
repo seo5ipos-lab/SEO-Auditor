@@ -15,7 +15,7 @@ function initDB() {
         settings: {
             openRouterKey: '',
             wordstatKey: '',
-            systemPrompt: 'Сделай краткий SEO-анализ по этим агрегированным данным. Выдели главные угрозы со стороны конкурентов.'
+            systemPrompt: 'Сделай краткий SEO-анализ по этим агрегированным данным. Оцени динамику видимости. Выдели главные угрозы со стороны конкурентов.'
         },
         projects: []
     }).write();
@@ -25,7 +25,7 @@ let mainWindow;
 
 function createWindow() {
     mainWindow = new BrowserWindow({
-        width: 1300,
+        width: 1400,
         height: 900,
         webPreferences: {
             nodeIntegration: true,
@@ -43,7 +43,6 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
-// --- IPC Мосты ---
 ipcMain.handle('get-settings', () => db.get('settings').value());
 ipcMain.on('save-settings', (event, newSettings) => { db.set('settings', newSettings).write(); });
 
