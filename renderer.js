@@ -108,6 +108,7 @@ window.openProject = (id) => {
     document.getElementById('dash-info').innerText = `Домены: ${activeProj.domains} | Бренд: ${activeProj.brands}`;
     document.getElementById('proj-queries').value = activeProj.queries.join('\n');
     
+    // Восстановление чекбоксов
     document.getElementById('cb-google-ai').checked = activeProj.models.includes('google-ai');
     document.getElementById('cb-yandex-alisa').checked = activeProj.models.includes('yandex-alisa');
     
@@ -122,29 +123,80 @@ window.openProject = (id) => {
 
 document.getElementById('search-models').addEventListener('input', () => renderModelsList());
 
+// --- ОБНОВЛЕННЫЙ РЕНДЕР МОДЕЛЕЙ (ЧИПСЫ + СОРТИРОВКА) ---
 function renderModelsList() {
     const list = document.getElementById('proj-models-list');
+    const chipsContainer = document.getElementById('selected-models-chips');
     const search = document.getElementById('search-models').value.toLowerCase();
+    
     list.innerHTML = '';
+    chipsContainer.innerHTML = ''; // Очищаем чипсы при каждом рендере
+    
     if (allModels.length === 0) return list.innerHTML = '<p class="text-red-500">Модели не загружены.</p>';
     
-    allModels.forEach(m => {
+    // 1. Отрисовка чипсов (тегов) над поиском
+    Array.from(tempSelectedModels).forEach(modelId => {
+        // Делаем красивое короткое имя без префиксов (например, из google/gemma делает gemma)
+        const shortName = modelId.split('/').pop();
+        
+        const chip = document.createElement('div');
+        chip.className = 'bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1.5 rounded flex items-center shadow-sm border border-blue-200';
+        chip.innerHTML = `
+            <span>${shortName}</span>
+            <button class="ml-1.5 text-blue-500 hover:text-red-600 focus:outline-none" title="Удалить">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        `;
+        
+        // Обработчик удаления по крестику
+        chip.querySelector('button').addEventListener('click', (e) => {
+            e.stopPropagation();
+            tempSelectedModels.delete(modelId);
+            renderModelsList(); // Динамически перерисовываем
+        });
+        
+        chipsContainer.appendChild(chip);
+    });
+
+    // 2. Фильтрация списка по поиску
+    let filteredModels = allModels.filter(m => {
         const mId = m.id ? m.id.toLowerCase() : '';
         const mName = m.name ? m.name.toLowerCase() : '';
-        if (mId.includes(search) || mName.includes(search)) {
-            const checked = tempSelectedModels.has(m.id) ? 'checked' : '';
-            const label = document.createElement('label');
-            label.className = 'block mb-1 cursor-pointer hover:bg-gray-100 p-1 rounded flex items-center';
-            label.innerHTML = `<input type="checkbox" value="${m.id}" class="mr-2" ${checked}> <span class="font-semibold text-blue-800 mr-2">${m.id}</span> <span class="text-xs text-gray-500 truncate">(${m.name || 'Без названия'})</span>`;
-            
-            label.querySelector('input').addEventListener('change', (e) => {
-                if (e.target.checked) tempSelectedModels.add(m.id);
-                else tempSelectedModels.delete(m.id);
-            });
-            list.appendChild(label);
-        }
+        return mId.includes(search) || mName.includes(search);
+    });
+
+    // 3. УМНАЯ СОРТИРОВКА: Выбранные модели всегда поднимаются на самый верх!
+    filteredModels.sort((a, b) => {
+        const aSelected = tempSelectedModels.has(a.id);
+        const bSelected = tempSelectedModels.has(b.id);
+        if (aSelected && !bSelected) return -1;
+        if (!aSelected && bSelected) return 1;
+        return 0; // Оставляем стандартную сортировку, если оба выбраны/не выбраны
+    });
+
+    // 4. Отрисовка самого списка моделей
+    filteredModels.forEach(m => {
+        const checked = tempSelectedModels.has(m.id);
+        // Если модель выбрана, подсвечиваем всю строчку легким голубым фоном
+        const bgClass = checked ? 'bg-blue-50 border-blue-200' : 'hover:bg-gray-100 border-transparent';
+        
+        const label = document.createElement('label');
+        label.className = `block mb-1 cursor-pointer p-1.5 rounded flex items-center border ${bgClass} transition-colors`;
+        label.innerHTML = `
+            <input type="checkbox" value="${m.id}" class="mr-2" ${checked ? 'checked' : ''}> 
+            <span class="font-semibold ${checked ? 'text-blue-700' : 'text-blue-800'} mr-2">${m.id}</span> 
+            <span class="text-xs text-gray-500 truncate">(${m.name || 'Без названия'})</span>
+        `;
+        
+        label.querySelector('input').addEventListener('change', (e) => {
+            if (e.target.checked) tempSelectedModels.add(m.id);
+            else tempSelectedModels.delete(m.id);
+            renderModelsList(); // Перерисовка при клике на чекбокс (чтобы модель улетела вверх/вниз)
+        });
+        list.appendChild(label);
     });
 }
+// -------------------------------------------------------------
 
 window.saveProjectData = () => {
     activeProj.queries = document.getElementById('proj-queries').value.split('\n').map(q=>q.trim()).filter(Boolean);
@@ -165,24 +217,30 @@ function extractDomains(text) {
     return [...new Set(matches)];
 }
 
+// РЕАЛЬНЫЙ API YANDEX WORDSTAT (Директ API v4)
 async function fetchWordstatRealAPI(query, token) {
     if (!token) return { freq: 0, status: '<span class="text-red-500 text-xs">Нет токена</span>' };
     try {
         const url = 'https://api.direct.yandex.ru/v4/json/';
         const reqOpts = (method, param) => ({
             method: 'POST',
-            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            headers: {
+                'Content-Type': 'application/json; charset=utf-8'
+            },
             body: JSON.stringify({ method: method, param: param, token: token })
         });
 
         const createRes = await fetch(url, reqOpts('CreateNewWordstatReport', { Phrases: [query], GeoID: [225] }));
         const createData = await createRes.json();
         
+        // ЕСЛИ ЯНДЕКС ВОЗВРАЩАЕТ ОШИБКУ — ВЫВОДИМ ЕЁ
         if (createData.error_code) {
+            console.error("Ошибка Yandex:", createData.error_str);
             return { freq: 0, status: `<span class="text-red-600 font-bold text-[10px]" title="${createData.error_str}">Код: ${createData.error_code}</span>` };
         }
         
         const reportId = createData.data;
+
         let isDone = false;
         let attempts = 0;
         while (!isDone && attempts < 15) {
@@ -210,6 +268,7 @@ async function fetchWordstatRealAPI(query, token) {
     }
 }
 
+// --- УПРАВЛЕНИЕ ОЧЕРЕДЬЮ И СЪЕМ ---
 const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
 const btnContinue = document.getElementById('btn-continue');
@@ -224,7 +283,9 @@ function resetQueueUI() {
 }
 
 btnStart.addEventListener('click', async () => {
+    // Автосохранение перед стартом
     window.saveProjectData();
+
     if (activeProj.queries.length === 0 || activeProj.models.length === 0) return alert('Добавьте запросы и выберите модели!');
     if (!settings.openRouterKey) return alert('Нет API ключа OpenRouter!');
 
@@ -242,8 +303,11 @@ btnStart.addEventListener('click', async () => {
 
     for (const q of activeProj.queries) {
         currentSession.queriesResult[q] = { freq: 0, modelsData: {} };
-        for (const m of activeProj.models) { taskQueue.push({ query: q, model: m }); }
+        for (const m of activeProj.models) {
+            taskQueue.push({ query: q, model: m });
+        }
     }
+
     startQueue(wordstatCache);
 });
 
@@ -255,18 +319,27 @@ btnStop.addEventListener('click', () => {
     document.getElementById('status-progress').innerHTML += ' <span class="text-yellow-600 font-bold">(Пауза)</span>';
 });
 
-btnContinue.addEventListener('click', () => { startQueue(currentSession.wordstatCache || {}); });
+btnContinue.addEventListener('click', () => {
+    startQueue(currentSession.wordstatCache || {});
+});
 
 btnCancel.addEventListener('click', () => {
     if(confirm('Отменить задачу? Данные не будут сохранены в историю.')) {
-        isCancelled = true; taskQueue = []; if (abortCtrl) abortCtrl.abort(); resetQueueUI();
+        isCancelled = true;
+        taskQueue = [];
+        if (abortCtrl) abortCtrl.abort();
+        resetQueueUI();
     }
 });
 
 function startQueue(wsCache) {
-    isPaused = false; isCancelled = false; currentSession.wordstatCache = wsCache;
-    btnStart.classList.add('hidden'); btnContinue.classList.add('hidden');
-    btnStop.classList.remove('hidden'); btnCancel.classList.remove('hidden');
+    isPaused = false;
+    isCancelled = false;
+    currentSession.wordstatCache = wsCache;
+    btnStart.classList.add('hidden');
+    btnContinue.classList.add('hidden');
+    btnStop.classList.remove('hidden');
+    btnCancel.classList.remove('hidden');
     processQueue();
 }
 
@@ -285,6 +358,7 @@ async function processQueue() {
         if (task.model === 'google-ai') { visualModelName = 'Google AI'; modelBg = 'bg-green-100 text-green-700'; }
         if (task.model === 'yandex-alisa') { visualModelName = 'Yandex Нейро'; modelBg = 'bg-red-100 text-red-700'; }
 
+        // Рендер Аккордеона в таблице
         const trMain = document.createElement('tr');
         trMain.className = "hover:bg-blue-50 border-b cursor-pointer transition";
         trMain.onclick = () => toggleAccordion(`det-${tid}`);
@@ -304,10 +378,12 @@ async function processQueue() {
         trDet.className = "hidden bg-white border-b";
         trDet.innerHTML = `<td colspan="5"><div class="p-4 text-sm text-gray-700 markdown-body" id="${tid}-content">Ожидание данных...</div></td>`;
 
-        tbody.prepend(trDet); tbody.prepend(trMain);
+        tbody.prepend(trDet); 
+        tbody.prepend(trMain);
 
         let fullText = '';
         try {
+            // Получаем WS частотность (с кешированием)
             if (currentSession.wordstatCache[task.query] === undefined) {
                 const wsResult = await fetchWordstatRealAPI(task.query, settings.yandexToken);
                 currentSession.wordstatCache[task.query] = wsResult;
@@ -316,14 +392,17 @@ async function processQueue() {
             const wsFreqData = currentSession.wordstatCache[task.query];
             document.getElementById(`${tid}-ws`).innerHTML = wsFreqData.status;
 
+            // РАЗВИЛКА: Нативный парсер ИЛИ OpenRouter API
             if (task.model === 'google-ai' || task.model === 'yandex-alisa') {
                 document.getElementById(`${tid}-status`).innerHTML = `<span class="animate-pulse text-purple-500 font-bold">Окно парсера...</span>`;
+                
                 const parseRes = await ipcRenderer.invoke('parse-search-engine', { engine: task.model, query: task.query });
                 if (parseRes.error) throw new Error(parseRes.error);
                 
                 fullText = parseRes.text || '';
                 document.getElementById(`${tid}-content`).innerHTML = marked.parse(fullText);
             } else {
+                // Запрос в нейросеть через OpenRouter
                 const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${settings.openRouterKey}`, 'Content-Type': 'application/json' },
@@ -351,6 +430,8 @@ async function processQueue() {
                         }
                     }
                 }
+                
+                // Подсчет стоимости только для платных API
                 const pricing = modelsPricing[task.model] || { prompt: 0, completion: 0 };
                 const inCost = (task.query.length / 4) * parseFloat(pricing.prompt || 0);
                 const outCost = (fullText.length / 4) * parseFloat(pricing.completion || 0);
@@ -358,12 +439,16 @@ async function processQueue() {
                 document.getElementById('status-cost').innerText = `$${currentSession.totalCost.toFixed(6)}`;
             }
 
+            // ОБЩАЯ ЛОГИКА ДЛЯ ВСЕХ МОДЕЛЕЙ (Оценка ответа)
             const foundDomains = extractDomains(fullText);
             document.getElementById(`${tid}-src`).innerHTML = foundDomains.length > 0 ? foundDomains.join(', ') : '<span class="text-gray-400">Нет</span>';
-            foundDomains.forEach(d => { if(!myDomains.includes(d)) currentSession.domainsFound[d] = (currentSession.domainsFound[d] || 0) + 1; });
+            foundDomains.forEach(d => {
+                if(!myDomains.includes(d)) currentSession.domainsFound[d] = (currentSession.domainsFound[d] || 0) + 1;
+            });
 
             const isBrandFound = brandKeywords.some(b => fullText.toLowerCase().includes(b)) || foundDomains.some(d => myDomains.includes(d));
-            let sentimentStr = '-';
+            
+            currentSession.queriesResult[task.query].modelsData[task.model] = isBrandFound ? 1 : 0;
             
             if (wsFreqData.freq > 0) {
                 currentSession.weightTotal += wsFreqData.freq;
@@ -384,11 +469,9 @@ async function processQueue() {
                     });
                     const sentData = await sentRes.json();
                     const sentiment = sentData.choices[0].message.content.trim();
-                    sentimentStr = sentiment;
                     let col = sentiment.includes('ПОЗИТИВ') ? 'text-green-600' : sentiment.includes('НЕГАТИВ') ? 'text-red-600' : 'text-gray-600';
                     document.getElementById(`${tid}-sent`).innerHTML = `<span class="${col} font-bold">${sentiment}</span>`;
                 } catch(e) {
-                    sentimentStr = 'Ошибка ИИ';
                     document.getElementById(`${tid}-sent`).innerHTML = `<span class="text-orange-500 text-xs">Ошибка ИИ</span>`;
                 }
             } else {
@@ -396,20 +479,17 @@ async function processQueue() {
                 document.getElementById(`${tid}-sent`).innerHTML = `<span class="text-gray-300">-</span>`;
             }
 
-            currentSession.queriesResult[task.query].modelsData[task.model] = {
-                found: isBrandFound ? 1 : 0,
-                sentiment: sentimentStr,
-                domains: foundDomains
-            };
-
             completedTasksCount++;
             document.getElementById('status-progress').innerText = `${completedTasksCount}/${currentSession.totalTasks}`;
 
         } catch (error) {
             if (error.name === 'AbortError') {
-                taskQueue.unshift(task); trMain.remove(); trDet.remove(); break; 
+                taskQueue.unshift(task); 
+                trMain.remove(); 
+                trDet.remove();
+                break; 
             } else {
-                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-600 font-bold">Ошибка</span>`;
+                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-600 font-bold">Ошибка: ${error.message.substring(0,20)}</span>`;
                 completedTasksCount++;
             }
         }
@@ -418,16 +498,23 @@ async function processQueue() {
     if (!isPaused && !isCancelled && taskQueue.length === 0) {
         currentSession.vGen = currentSession.totalTasks > 0 ? ((currentSession.successQueries / currentSession.totalTasks) * 100).toFixed(1) : 0;
         currentSession.vWeight = currentSession.weightTotal > 0 ? ((currentSession.weightedSum / currentSession.weightTotal) * 100).toFixed(1) : 0;
+        
         activeProj.sessions.push(currentSession);
         ipcRenderer.send('save-project', activeProj);
         document.getElementById('status-progress').innerText += ' (Съем завершен)';
-        resetQueueUI(); btnStart.classList.remove('hidden'); btnStart.innerText = 'Начать новый съем';
+        
+        resetQueueUI();
+        btnStart.classList.remove('hidden');
+        btnStart.innerText = 'Начать новый съем';
     }
 }
 
+// --- ИСТОРИЯ И АНАЛИТИКА ---
 window.deleteSession = (index) => {
     if(confirm('Удалить эту сессию съема?')) {
-        activeProj.sessions.splice(index, 1); ipcRenderer.send('save-project', activeProj); renderHistory();
+        activeProj.sessions.splice(index, 1);
+        ipcRenderer.send('save-project', activeProj);
+        renderHistory();
     }
 }
 
@@ -591,7 +678,6 @@ window.exportToExcel = async () => {
         wsSummary.getCell('A2').font = { size: 12, italic: true };
 
         if (globalChartInst && modelsChartInst) {
-            // Конвертируем графики в картинки (благодаря плагину фон будет белым)
             const globalBase64 = globalChartInst.toBase64Image().split(',')[1];
             const globalImgId = wb.addImage({ base64: globalBase64, extension: 'png' });
             wsSummary.addImage(globalImgId, 'A4:G20');
