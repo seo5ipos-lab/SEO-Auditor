@@ -87,6 +87,20 @@
                             </label>
                         </div>
 
+                        <div class="bg-slate-50 p-4 rounded mb-4 border border-slate-200 shadow-sm">
+                            <h3 class="font-bold text-slate-900 text-sm mb-3">⚙️ Опции генерации (OpenRouter)</h3>
+                            <div class="space-y-3">
+                                <label class="flex items-center cursor-pointer">
+                                    <input type="checkbox" id="cb-web-search" class="w-4 h-4 text-blue-600 rounded mr-2"> 
+                                    <span class="font-semibold text-sm text-slate-800">Включить Web Search (Веб-поиск)</span>
+                                </label>
+                                <label class="flex items-center justify-between text-sm">
+                                    <span class="font-semibold text-slate-800">Одновременных потоков:</span>
+                                    <input type="number" id="num-concurrency" min="1" max="5" value="1" class="w-16 border border-slate-300 rounded p-1 text-center font-bold text-slate-900 outline-none focus:ring-2 focus:ring-blue-500">
+                                </label>
+                            </div>
+                        </div>
+
                         <h3 class="font-bold mb-2">Нейросети (OpenRouter API)</h3>
                         
                         <div id="selected-models-chips" class="flex flex-wrap gap-2 mb-3 empty:hidden"></div>
