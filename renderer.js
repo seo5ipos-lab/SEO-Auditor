@@ -1,6 +1,5 @@
 const { ipcRenderer } = require('electron');
 
-// ПЛАГИН ДЛЯ БЕЛОГО ФОНА ГРАФИКОВ ПРИ ЭКСПОРТЕ В EXCEL
 Chart.register({
     id: 'customCanvasBackgroundColor',
     beforeDraw: (chart) => {
@@ -27,6 +26,7 @@ let completedTasksCount = 0;
 
 async function init() {
     settings = await ipcRenderer.invoke('get-settings');
+    if (!settings.favorites) settings.favorites = []; 
     if (settings) {
         document.getElementById('set-or').value = settings.openRouterKey || '';
         document.getElementById('set-ya').value = settings.yandexToken || '';
@@ -108,9 +108,15 @@ window.openProject = (id) => {
     document.getElementById('dash-info').innerText = `Домены: ${activeProj.domains} | Бренд: ${activeProj.brands}`;
     document.getElementById('proj-queries').value = activeProj.queries.join('\n');
     
-    // Восстановление чекбоксов
     document.getElementById('cb-google-ai').checked = activeProj.models.includes('google-ai');
     document.getElementById('cb-yandex-alisa').checked = activeProj.models.includes('yandex-alisa');
+    
+    // ВОССТАНОВЛЕНО: Чекбоксы вебпоиска и потоков
+    const wsCheckbox = document.getElementById('cb-web-search');
+    if (wsCheckbox) wsCheckbox.checked = !!activeProj.useWebSearch;
+    
+    const concInput = document.getElementById('num-concurrency');
+    if (concInput) concInput.value = activeProj.concurrency || 1;
     
     tempSelectedModels = new Set(activeProj.models.filter(m => m !== 'google-ai' && m !== 'yandex-alisa'));
     document.getElementById('search-models').value = '';
@@ -121,24 +127,29 @@ window.openProject = (id) => {
     switchProjTab('ptab-setup');
 }
 
+window.toggleFavorite = (modelId, e) => {
+    e.stopPropagation();
+    if (settings.favorites.includes(modelId)) settings.favorites = settings.favorites.filter(id => id !== modelId);
+    else settings.favorites.push(modelId);
+    ipcRenderer.send('save-settings', settings); 
+    renderModelsList();
+}
+
 document.getElementById('search-models').addEventListener('input', () => renderModelsList());
 
-// --- ОБНОВЛЕННЫЙ РЕНДЕР МОДЕЛЕЙ (ЧИПСЫ + СОРТИРОВКА) ---
 function renderModelsList() {
     const list = document.getElementById('proj-models-list');
     const chipsContainer = document.getElementById('selected-models-chips');
     const search = document.getElementById('search-models').value.toLowerCase();
     
     list.innerHTML = '';
-    chipsContainer.innerHTML = ''; // Очищаем чипсы при каждом рендере
+    chipsContainer.innerHTML = ''; 
     
     if (allModels.length === 0) return list.innerHTML = '<p class="text-red-500">Модели не загружены.</p>';
     
     // 1. Отрисовка чипсов (тегов) над поиском
     Array.from(tempSelectedModels).forEach(modelId => {
-        // Делаем красивое короткое имя без префиксов (например, из google/gemma делает gemma)
         const shortName = modelId.split('/').pop();
-        
         const chip = document.createElement('div');
         chip.className = 'bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1.5 rounded flex items-center shadow-sm border border-blue-200';
         chip.innerHTML = `
@@ -147,56 +158,74 @@ function renderModelsList() {
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
         `;
-        
-        // Обработчик удаления по крестику
         chip.querySelector('button').addEventListener('click', (e) => {
             e.stopPropagation();
             tempSelectedModels.delete(modelId);
-            renderModelsList(); // Динамически перерисовываем
+            renderModelsList(); 
         });
-        
         chipsContainer.appendChild(chip);
     });
 
-    // 2. Фильтрация списка по поиску
     let filteredModels = allModels.filter(m => {
         const mId = m.id ? m.id.toLowerCase() : '';
         const mName = m.name ? m.name.toLowerCase() : '';
         return mId.includes(search) || mName.includes(search);
     });
 
-    // 3. УМНАЯ СОРТИРОВКА: Выбранные модели всегда поднимаются на самый верх!
+    // 2. ВОССТАНОВЛЕНО: Сортировка по Выбранным, затем по Избранным
     filteredModels.sort((a, b) => {
         const aSelected = tempSelectedModels.has(a.id);
         const bSelected = tempSelectedModels.has(b.id);
         if (aSelected && !bSelected) return -1;
         if (!aSelected && bSelected) return 1;
-        return 0; // Оставляем стандартную сортировку, если оба выбраны/не выбраны
+
+        const aFav = settings.favorites.includes(a.id);
+        const bFav = settings.favorites.includes(b.id);
+        if (aFav && !bFav) return -1;
+        if (!aFav && bFav) return 1;
+
+        return 0; 
     });
 
-    // 4. Отрисовка самого списка моделей
+    // 3. Отрисовка списка
     filteredModels.forEach(m => {
         const checked = tempSelectedModels.has(m.id);
-        // Если модель выбрана, подсвечиваем всю строчку легким голубым фоном
+        const isFav = settings.favorites.includes(m.id);
         const bgClass = checked ? 'bg-blue-50 border-blue-200' : 'hover:bg-gray-100 border-transparent';
+        const starCol = isFav ? 'text-yellow-400 fill-current' : 'text-gray-300 hover:text-yellow-400';
+        
+        const pPrompt = parseFloat(m.pricing?.prompt || 0) * 1000000;
+        const pComp = parseFloat(m.pricing?.completion || 0) * 1000000;
+        
+        let priceBadge = '';
+        if (pPrompt > 0 || pComp > 0) {
+            priceBadge = `<span class="ml-2 text-[10px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded border border-emerald-200 whitespace-nowrap">Вх: $${pPrompt.toFixed(2)} | Вых: $${pComp.toFixed(2)} / 1M</span>`;
+        } else {
+            priceBadge = `<span class="ml-2 text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-200 whitespace-nowrap font-bold">Бесплатно</span>`;
+        }
         
         const label = document.createElement('label');
         label.className = `block mb-1 cursor-pointer p-1.5 rounded flex items-center border ${bgClass} transition-colors`;
         label.innerHTML = `
-            <input type="checkbox" value="${m.id}" class="mr-2" ${checked ? 'checked' : ''}> 
-            <span class="font-semibold ${checked ? 'text-blue-700' : 'text-blue-800'} mr-2">${m.id}</span> 
-            <span class="text-xs text-gray-500 truncate">(${m.name || 'Без названия'})</span>
+            <div class="flex items-center flex-grow min-w-0 pr-2">
+                <input type="checkbox" value="${m.id}" class="mr-2 flex-shrink-0" ${checked ? 'checked' : ''}> 
+                <span class="font-semibold ${checked ? 'text-blue-700' : 'text-blue-800'} mr-2 truncate">${m.id}</span> 
+                <span class="text-xs text-gray-500 truncate hidden lg:inline">(${m.name || 'Без названия'})</span>
+            </div>
+            ${priceBadge}
+            <button class="ml-2 p-1 focus:outline-none" onclick="toggleFavorite('${m.id}', event)" title="В избранное">
+                <svg class="w-5 h-5 ${starCol} transition-colors" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
+            </button>
         `;
         
         label.querySelector('input').addEventListener('change', (e) => {
             if (e.target.checked) tempSelectedModels.add(m.id);
             else tempSelectedModels.delete(m.id);
-            renderModelsList(); // Перерисовка при клике на чекбокс (чтобы модель улетела вверх/вниз)
+            renderModelsList(); 
         });
         list.appendChild(label);
     });
 }
-// -------------------------------------------------------------
 
 window.saveProjectData = () => {
     activeProj.queries = document.getElementById('proj-queries').value.split('\n').map(q=>q.trim()).filter(Boolean);
@@ -205,6 +234,13 @@ window.saveProjectData = () => {
     if (document.getElementById('cb-google-ai').checked) nativeModels.push('google-ai');
     if (document.getElementById('cb-yandex-alisa').checked) nativeModels.push('yandex-alisa');
     
+    // ВОССТАНОВЛЕНО: Сохранение настроек веб-поиска и потоков
+    const wsCheckbox = document.getElementById('cb-web-search');
+    if (wsCheckbox) activeProj.useWebSearch = wsCheckbox.checked;
+    
+    const concInput = document.getElementById('num-concurrency');
+    if (concInput) activeProj.concurrency = parseInt(concInput.value) || 1;
+
     activeProj.models = [...Array.from(tempSelectedModels), ...nativeModels];
     ipcRenderer.send('save-project', activeProj);
     alert('Настройки проекта сохранены!');
@@ -217,25 +253,20 @@ function extractDomains(text) {
     return [...new Set(matches)];
 }
 
-// РЕАЛЬНЫЙ API YANDEX WORDSTAT (Директ API v4)
 async function fetchWordstatRealAPI(query, token) {
     if (!token) return { freq: 0, status: '<span class="text-red-500 text-xs">Нет токена</span>' };
     try {
         const url = 'https://api.direct.yandex.ru/v4/json/';
         const reqOpts = (method, param) => ({
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json; charset=utf-8'
-            },
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
             body: JSON.stringify({ method: method, param: param, token: token })
         });
 
         const createRes = await fetch(url, reqOpts('CreateNewWordstatReport', { Phrases: [query], GeoID: [225] }));
         const createData = await createRes.json();
         
-        // ЕСЛИ ЯНДЕКС ВОЗВРАЩАЕТ ОШИБКУ — ВЫВОДИМ ЕЁ
         if (createData.error_code) {
-            console.error("Ошибка Yandex:", createData.error_str);
             return { freq: 0, status: `<span class="text-red-600 font-bold text-[10px]" title="${createData.error_str}">Код: ${createData.error_code}</span>` };
         }
         
@@ -268,7 +299,6 @@ async function fetchWordstatRealAPI(query, token) {
     }
 }
 
-// --- УПРАВЛЕНИЕ ОЧЕРЕДЬЮ И СЪЕМ ---
 const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
 const btnContinue = document.getElementById('btn-continue');
@@ -283,7 +313,6 @@ function resetQueueUI() {
 }
 
 btnStart.addEventListener('click', async () => {
-    // Автосохранение перед стартом
     window.saveProjectData();
 
     if (activeProj.queries.length === 0 || activeProj.models.length === 0) return alert('Добавьте запросы и выберите модели!');
@@ -319,46 +348,37 @@ btnStop.addEventListener('click', () => {
     document.getElementById('status-progress').innerHTML += ' <span class="text-yellow-600 font-bold">(Пауза)</span>';
 });
 
-btnContinue.addEventListener('click', () => {
-    startQueue(currentSession.wordstatCache || {});
-});
+btnContinue.addEventListener('click', () => { startQueue(currentSession.wordstatCache || {}); });
 
 btnCancel.addEventListener('click', () => {
     if(confirm('Отменить задачу? Данные не будут сохранены в историю.')) {
-        isCancelled = true;
-        taskQueue = [];
-        if (abortCtrl) abortCtrl.abort();
-        resetQueueUI();
+        isCancelled = true; taskQueue = []; if (abortCtrl) abortCtrl.abort(); resetQueueUI();
     }
 });
 
 function startQueue(wsCache) {
-    isPaused = false;
-    isCancelled = false;
-    currentSession.wordstatCache = wsCache;
-    btnStart.classList.add('hidden');
-    btnContinue.classList.add('hidden');
-    btnStop.classList.remove('hidden');
-    btnCancel.classList.remove('hidden');
+    isPaused = false; isCancelled = false; currentSession.wordstatCache = wsCache;
+    btnStart.classList.add('hidden'); btnContinue.classList.add('hidden');
+    btnStop.classList.remove('hidden'); btnCancel.classList.remove('hidden');
     processQueue();
 }
 
+// ВОССТАНОВЛЕНО: Асинхронный Пул Воркеров (Многопоточность)
 async function processQueue() {
     const tbody = document.getElementById('results-tbody');
     const brandKeywords = (activeProj.brands || '').split(',').map(b=>b.trim().toLowerCase()).filter(Boolean);
     const myDomains = (activeProj.domains || '').split(',').map(d=>d.trim().toLowerCase()).filter(Boolean);
+    
+    abortCtrl = new AbortController();
 
-    while (taskQueue.length > 0 && !isPaused && !isCancelled) {
-        const task = taskQueue.shift(); 
-        abortCtrl = new AbortController();
-        const tid = `tr-${Date.now()}-${Math.floor(Math.random()*1000)}`;
+    const processTask = async (task) => {
+        const tid = `tr-${Date.now()}-${Math.floor(Math.random()*10000)}`;
         
         let visualModelName = task.model;
         let modelBg = 'bg-blue-100 text-blue-700';
         if (task.model === 'google-ai') { visualModelName = 'Google AI'; modelBg = 'bg-green-100 text-green-700'; }
         if (task.model === 'yandex-alisa') { visualModelName = 'Yandex Нейро'; modelBg = 'bg-red-100 text-red-700'; }
 
-        // Рендер Аккордеона в таблице
         const trMain = document.createElement('tr');
         trMain.className = "hover:bg-blue-50 border-b cursor-pointer transition";
         trMain.onclick = () => toggleAccordion(`det-${tid}`);
@@ -378,35 +398,35 @@ async function processQueue() {
         trDet.className = "hidden bg-white border-b";
         trDet.innerHTML = `<td colspan="5"><div class="p-4 text-sm text-gray-700 markdown-body" id="${tid}-content">Ожидание данных...</div></td>`;
 
-        tbody.prepend(trDet); 
-        tbody.prepend(trMain);
+        tbody.prepend(trDet); tbody.prepend(trMain);
 
         let fullText = '';
         try {
-            // Получаем WS частотность (с кешированием)
             if (currentSession.wordstatCache[task.query] === undefined) {
-                const wsResult = await fetchWordstatRealAPI(task.query, settings.yandexToken);
-                currentSession.wordstatCache[task.query] = wsResult;
-                currentSession.queriesResult[task.query].freq = wsResult.freq;
+                currentSession.wordstatCache[task.query] = fetchWordstatRealAPI(task.query, settings.yandexToken).then(res => {
+                    currentSession.queriesResult[task.query].freq = res.freq;
+                    return res;
+                });
             }
-            const wsFreqData = currentSession.wordstatCache[task.query];
+            const wsFreqData = await currentSession.wordstatCache[task.query];
             document.getElementById(`${tid}-ws`).innerHTML = wsFreqData.status;
 
-            // РАЗВИЛКА: Нативный парсер ИЛИ OpenRouter API
             if (task.model === 'google-ai' || task.model === 'yandex-alisa') {
                 document.getElementById(`${tid}-status`).innerHTML = `<span class="animate-pulse text-purple-500 font-bold">Окно парсера...</span>`;
-                
                 const parseRes = await ipcRenderer.invoke('parse-search-engine', { engine: task.model, query: task.query });
                 if (parseRes.error) throw new Error(parseRes.error);
                 
                 fullText = parseRes.text || '';
                 document.getElementById(`${tid}-content`).innerHTML = marked.parse(fullText);
             } else {
-                // Запрос в нейросеть через OpenRouter
+                // ВОССТАНОВЛЕНО: Плагин вебпоиска
+                const reqBody = { model: task.model, messages: [{role: 'user', content: task.query}], stream: true };
+                if (activeProj.useWebSearch) reqBody.plugins = [{ id: "web" }];
+
                 const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${settings.openRouterKey}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model: task.model, messages: [{role: 'user', content: task.query}], stream: true }),
+                    body: JSON.stringify(reqBody),
                     signal: abortCtrl.signal
                 });
 
@@ -431,7 +451,6 @@ async function processQueue() {
                     }
                 }
                 
-                // Подсчет стоимости только для платных API
                 const pricing = modelsPricing[task.model] || { prompt: 0, completion: 0 };
                 const inCost = (task.query.length / 4) * parseFloat(pricing.prompt || 0);
                 const outCost = (fullText.length / 4) * parseFloat(pricing.completion || 0);
@@ -439,7 +458,6 @@ async function processQueue() {
                 document.getElementById('status-cost').innerText = `$${currentSession.totalCost.toFixed(6)}`;
             }
 
-            // ОБЩАЯ ЛОГИКА ДЛЯ ВСЕХ МОДЕЛЕЙ (Оценка ответа)
             const foundDomains = extractDomains(fullText);
             document.getElementById(`${tid}-src`).innerHTML = foundDomains.length > 0 ? foundDomains.join(', ') : '<span class="text-gray-400">Нет</span>';
             foundDomains.forEach(d => {
@@ -484,16 +502,25 @@ async function processQueue() {
 
         } catch (error) {
             if (error.name === 'AbortError') {
-                taskQueue.unshift(task); 
-                trMain.remove(); 
-                trDet.remove();
-                break; 
+                taskQueue.unshift(task); trMain.remove(); trDet.remove(); return; 
             } else {
-                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-600 font-bold">Ошибка: ${error.message.substring(0,20)}</span>`;
+                document.getElementById(`${tid}-status`).innerHTML = `<span class="text-red-600 font-bold">Ошибка</span>`;
                 completedTasksCount++;
             }
         }
-    }
+    };
+
+    const runWorker = async () => {
+        while (taskQueue.length > 0 && !isPaused && !isCancelled) {
+            const task = taskQueue.shift(); if (!task) break; await processTask(task);
+        }
+    };
+
+    const maxWorkers = Math.min(5, Math.max(1, parseInt(activeProj.concurrency) || 1));
+    const workers = [];
+    for (let i = 0; i < maxWorkers; i++) workers.push(runWorker());
+
+    await Promise.all(workers);
 
     if (!isPaused && !isCancelled && taskQueue.length === 0) {
         currentSession.vGen = currentSession.totalTasks > 0 ? ((currentSession.successQueries / currentSession.totalTasks) * 100).toFixed(1) : 0;
@@ -520,8 +547,11 @@ window.deleteSession = (index) => {
 
 window.renderHistory = () => {
     if (!activeProj || !activeProj.sessions) return;
+    
     let allQueries = new Set(activeProj.queries || []);
-    activeProj.sessions.forEach(s => { if(s.queriesResult) Object.keys(s.queriesResult).forEach(q => allQueries.add(q)); });
+    activeProj.sessions.forEach(s => {
+        if(s.queriesResult) Object.keys(s.queriesResult).forEach(q => allQueries.add(q));
+    });
     
     const thead = document.getElementById('history-thead');
     const tbody = document.getElementById('history-tbody');
@@ -535,25 +565,23 @@ window.renderHistory = () => {
         </th>`;
     });
     thead.innerHTML = ths + '</tr>';
-    tbody.innerHTML = '';
     
+    tbody.innerHTML = '';
     Array.from(allQueries).forEach(q => {
         let latestFreq = 'WS';
         for(let i = activeProj.sessions.length - 1; i >= 0; i--) {
             if(activeProj.sessions[i].queriesResult[q] && activeProj.sessions[i].queriesResult[q].freq) {
-                latestFreq = activeProj.sessions[i].queriesResult[q].freq; break;
+                latestFreq = activeProj.sessions[i].queriesResult[q].freq;
+                break;
             }
         }
+
         let row = `<tr><td class="p-2 border-r text-sm font-semibold text-gray-700">${q}</td><td class="p-2 border-r text-xs font-bold text-blue-600 text-center">${latestFreq}</td>`;
         activeProj.sessions.forEach(s => {
             if(s.queriesResult && s.queriesResult[q]) {
-                const mData = s.queriesResult[q].modelsData || {};
-                const totalM = Object.keys(mData).length;
-                let found = 0;
-                Object.values(mData).forEach(v => {
-                    if (typeof v === 'number') found += v;
-                    else if (v && typeof v === 'object') found += (v.found || 0);
-                });
+                const modelsData = s.queriesResult[q].modelsData || {};
+                const totalM = Object.keys(modelsData).length;
+                const found = Object.values(modelsData).reduce((a,b)=>a+b, 0);
                 const perc = totalM > 0 ? ((found/totalM)*100).toFixed(0) : 0;
                 row += `<td class="p-2 border-r text-center ${perc > 0 ? 'text-green-600 font-bold' : 'text-gray-400'}">${perc}%</td>`;
             } else { row += `<td class="p-2 border-r text-center text-gray-300">-</td>`; }
@@ -563,12 +591,16 @@ window.renderHistory = () => {
 
     let allCompetitors = {};
     activeProj.sessions.forEach(s => {
-        if (s.domainsFound) Object.entries(s.domainsFound).forEach(([dom, count]) => { allCompetitors[dom] = (allCompetitors[dom] || 0) + count; });
+        if (s.domainsFound) {
+            Object.entries(s.domainsFound).forEach(([dom, count]) => { allCompetitors[dom] = (allCompetitors[dom] || 0) + count; });
+        }
     });
-    const cList = document.getElementById('competitors-list'); cList.innerHTML = '';
+    const cList = document.getElementById('competitors-list');
+    cList.innerHTML = '';
     Object.entries(allCompetitors).sort((a,b)=>b[1]-a[1]).slice(0, 15).forEach(([dom, count]) => {
         cList.innerHTML += `<li class="flex justify-between border-b py-1"><span>${dom}</span><span class="font-bold text-blue-600">${count}</span></li>`;
     });
+
     drawCharts();
 }
 
@@ -594,24 +626,24 @@ function drawCharts() {
     let datasetsModels = [];
     let colors = ['#8b5cf6', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899'];
     let mIdx = 0;
-    let sessionModels = new Set();
     
+    let sessionModels = new Set();
     activeProj.sessions.forEach(s => {
-        if(s.queriesResult) Object.values(s.queriesResult).forEach(qr => {
-            if(qr.modelsData) Object.keys(qr.modelsData).forEach(m => sessionModels.add(m));
-        });
+        if(s.queriesResult) {
+            Object.values(s.queriesResult).forEach(qr => {
+                if(qr.modelsData) Object.keys(qr.modelsData).forEach(m => sessionModels.add(m));
+            });
+        }
     });
 
     sessionModels.forEach(model => {
         let data = activeProj.sessions.map(s => {
             let total = 0, found = 0;
-            if(s.queriesResult) Object.values(s.queriesResult).forEach(qr => {
-                if (qr.modelsData && qr.modelsData[model] !== undefined) {
-                    total++;
-                    let v = qr.modelsData[model];
-                    found += (typeof v === 'number' ? v : (v.found || 0));
-                }
-            });
+            if(s.queriesResult) {
+                Object.values(s.queriesResult).forEach(qr => {
+                    if (qr.modelsData && qr.modelsData[model] !== undefined) { total++; found += qr.modelsData[model]; }
+                });
+            }
             return total > 0 ? (found/total)*100 : null;
         });
         
@@ -627,7 +659,8 @@ function drawCharts() {
     const ctxM = document.getElementById('chart-models');
     if (ctxM) {
         modelsChartInst = new Chart(ctxM.getContext('2d'), {
-            type: 'line', data: { labels: labels, datasets: datasetsModels },
+            type: 'line',
+            data: { labels: labels, datasets: datasetsModels },
             options: { responsive: true, scales: { y: { min: 0, max: 100 } } }
         });
     }
@@ -643,6 +676,7 @@ window.runFinalAnalysis = async () => {
 
     let dynamicsText = activeProj.sessions.map((s, i) => `Сессия ${i+1} (${s.date}): Общая видимость ${s.vGen}%, Взвешенная ${s.vWeight}%.`).join(' ');
     const lastS = activeProj.sessions[activeProj.sessions.length - 1];
+    
     const domainsStr = lastS.domainsFound ? Object.keys(lastS.domainsFound).slice(0,10).join(', ') : 'Нет данных';
     const dataPrompt = `История съемов: ${dynamicsText}. Главные конкуренты последней сессии: ${domainsStr}. Сделай выводы о динамике.`;
 
@@ -657,10 +691,11 @@ window.runFinalAnalysis = async () => {
         });
         const data = await res.json();
         box.innerHTML = marked.parse(data.choices[0].message.content);
-    } catch (e) { box.innerHTML = '<span class="text-red-600">Ошибка API. Проверьте соединение.</span>'; }
+    } catch (e) {
+        box.innerHTML = '<span class="text-red-600">Ошибка API. Проверьте соединение.</span>';
+    }
 }
 
-// --- НОВАЯ ФУНКЦИЯ ЭКСПОРТА В EXCEL ---
 window.exportToExcel = async () => {
     if (!activeProj || !activeProj.sessions || activeProj.sessions.length === 0) {
         return alert('Нет данных для выгрузки. Сначала проведите хотя бы один съем данных!');
@@ -670,7 +705,6 @@ window.exportToExcel = async () => {
         const wb = new ExcelJS.Workbook();
         wb.creator = 'SEO Auditor PRO';
 
-        // Лист 1: Сводка и Графики
         const wsSummary = wb.addWorksheet('Сводка и Графики');
         wsSummary.getCell('A1').value = 'Отчет по проекту: ' + (activeProj.name || 'Без названия');
         wsSummary.getCell('A1').font = { size: 16, bold: true };
@@ -687,7 +721,6 @@ window.exportToExcel = async () => {
             wsSummary.addImage(modelsImgId, 'H4:N20');
         }
 
-        // Лист 2: История съемов (Таблица)
         const wsHistory = wb.addWorksheet('Динамика по сессиям');
         let histCols = [
             { header: 'Запрос', key: 'query', width: 40 },
@@ -727,7 +760,6 @@ window.exportToExcel = async () => {
             wsHistory.addRow(rowData);
         });
 
-        // Лист 3: Детализация (Сырые данные всех съемов)
         const wsDetails = wb.addWorksheet('Детализация данных');
         wsDetails.columns = [
             { header: 'Дата съема', key: 'date', width: 20 },
@@ -768,14 +800,12 @@ window.exportToExcel = async () => {
             }
         });
 
-        // Генерируем файл и вызываем скачивание в браузере (через Blob)
         const buffer = await wb.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
         
-        // Очищаем имя от запрещенных символов для файла
         const safeName = (activeProj.name || 'Project').replace(/[^a-z0-9а-яё]/gi, '_');
         a.download = `SEO_Auditor_Report_${safeName}.xlsx`;
         
